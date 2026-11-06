@@ -1,0 +1,23 @@
+# Local dependencies and Wrangler state
+node_modules/
+.wrangler/
+.dev.vars
+.dev.vars.*
+
+# Local credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+credentials.json
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*~

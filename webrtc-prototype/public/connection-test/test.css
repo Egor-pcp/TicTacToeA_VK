@@ -1,0 +1,89 @@
+:root {
+    color-scheme: light;
+    font-family: Arial, sans-serif;
+    color: #20243a;
+    background: #f4f7fb;
+    font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    min-width: 320px;
+    margin: 0;
+    padding: 24px 14px;
+}
+
+.panel {
+    width: min(100%, 760px);
+    margin: 0 auto;
+}
+
+header { margin-bottom: 18px; }
+.eyebrow { margin: 0 0 6px; color: #6069e8; font-size: .78rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+h1 { margin: 0; font-size: clamp(1.7rem, 5vw, 2.3rem); font-weight: 500; }
+.intro { margin: 8px 0 0; color: #687087; line-height: 1.45; }
+
+.card {
+    margin-top: 14px;
+    padding: 16px;
+    border: 1px solid #e0e4f0;
+    border-radius: 16px;
+    background: #fff;
+    box-shadow: 0 5px 18px rgb(39 51 96 / 5%);
+}
+
+h2 { margin: 0 0 12px; font-size: 1rem; }
+.status { min-height: 1.4em; margin: 0 0 12px; color: #5963df; font-weight: 700; }
+dl { margin: 0; }
+.identities > div, .diagnostics dl > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 7px 0;
+    border-bottom: 1px solid #edf0f6;
+}
+.identities > div:last-child, .diagnostics dl > div:last-child { border-bottom: 0; }
+dt { color: #727a8d; }
+dd { min-width: 0; margin: 0; overflow-wrap: anywhere; text-align: right; font-variant-numeric: tabular-nums; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+button, input { min-height: 44px; border-radius: 10px; font: inherit; }
+button { padding: 0 16px; border: 0; cursor: pointer; font-weight: 700; }
+button:disabled { cursor: not-allowed; opacity: .55; }
+.primary { color: white; background: #5d63e7; }
+.secondary { border: 1px solid #dce0ec; color: #31364b; background: #f7f8fc; }
+form { display: flex; gap: 8px; }
+input { width: 100%; min-width: 0; padding: 0 12px; border: 1px solid #dce0ec; outline-color: #6971ed; }
+.diagnostics dd { font-family: ui-monospace, Consolas, monospace; font-size: .9rem; }
+.log-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.log-heading h2 { margin: 0; }
+.text-button { min-height: 34px; padding: 0 8px; color: #5963df; background: transparent; }
+#event-log { display: grid; gap: 7px; max-height: 280px; margin: 12px 0 0; padding-left: 24px; overflow: auto; color: #4b5369; font-size: .9rem; }
+#event-log li { padding-left: 3px; overflow-wrap: anywhere; }
+.report-card { min-width: 0; }
+.report-card details { margin-top: 10px; }
+.report-card summary { cursor: pointer; color: #5963df; font-weight: 700; }
+.diagnostic-summary, .stats-details {
+    max-height: 360px;
+    margin: 10px 0 0;
+    padding: 12px;
+    overflow: auto;
+    border: 1px solid #edf0f6;
+    border-radius: 10px;
+    background: #f8f9fd;
+    color: #343a50;
+    font: .78rem/1.45 ui-monospace, Consolas, monospace;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.report-copy-status { min-height: 1em; margin: 6px 0 0; color: #5660d9; font-size: .85rem; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; clip-path: inset(50%); }
+
+@media (max-width: 480px) {
+    body { padding: 14px 10px; }
+    .card { padding: 13px; border-radius: 13px; }
+    .diagnostics dl > div { align-items: flex-start; }
+    .diagnostics dd { max-width: 58%; }
+    form { flex-wrap: wrap; }
+    form button { width: 100%; }
+}

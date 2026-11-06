@@ -1,0 +1,13 @@
+{
+  "name": "tictactoe-webrtc-prototype",
+  "private": true,
+  "version": "0.1.0",
+  "description": "WebRTC DataChannel connectivity prototype with Cloudflare Durable Objects",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "4.156.0"
+  }
+}

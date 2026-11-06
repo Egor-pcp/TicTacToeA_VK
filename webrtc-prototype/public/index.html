@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f7fb">
+    <title>WebRTC — тест соединения</title>
+    <link rel="stylesheet" href="./style.css">
+    <script type="module" src="./client.js"></script>
+</head>
+<body>
+    <main class="panel">
+        <header>
+            <p class="eyebrow">ИЗОЛИРОВАННЫЙ ПРОТОТИП</p>
+            <h1>Проверка WebRTC</h1>
+            <p class="intro">Cloudflare используется для поиска и сигнализации. После подключения сообщения идут напрямую между браузерами через WebRTC DataChannel.</p>
+        </header>
+
+        <section class="connection-card" aria-labelledby="connection-heading">
+            <h2 id="connection-heading">Соединение</h2>
+            <p id="connection-status" class="status" role="status" aria-live="polite">Не подключено</p>
+            <dl class="identities">
+                <div>
+                    <dt>Мой ID</dt>
+                    <dd id="own-id">—</dd>
+                </div>
+                <div>
+                    <dt>Найденный игрок</dt>
+                    <dd id="peer-id">—</dd>
+                </div>
+            </dl>
+            <div class="actions">
+                <button id="connect-button" class="primary" type="button">Подключиться и искать игрока</button>
+                <button id="cancel-button" class="secondary" type="button" hidden>Отменить поиск</button>
+            </div>
+        </section>
+
+        <section class="message-card" aria-labelledby="message-heading">
+            <h2 id="message-heading">Сообщение через DataChannel</h2>
+            <form id="message-form">
+                <label class="sr-only" for="message-input">Текст сообщения</label>
+                <input id="message-input" name="message" maxlength="1000" autocomplete="off" placeholder="Напишите сообщение…" disabled>
+                <button id="send-button" class="primary" type="submit" disabled>Отправить</button>
+            </form>
+            <p class="hint">Поле станет доступно после открытия прямого канала. STUN используется для попытки прямого соединения; TURN пока не настроен.</p>
+        </section>
+
+        <section class="log-card" aria-labelledby="log-heading">
+            <div class="log-heading">
+                <h2 id="log-heading">Журнал событий</h2>
+                <button id="clear-log-button" class="text-button" type="button">Очистить</button>
+            </div>
+            <ol id="event-log" aria-live="polite" aria-relevant="additions"></ol>
+        </section>
+    </main>
+</body>
+</html>

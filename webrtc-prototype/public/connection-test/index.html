@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f7fb">
+    <title>Тест WebRTC между сетями</title>
+    <link rel="stylesheet" href="./test.css">
+    <script type="module" src="./test.js"></script>
+</head>
+<body>
+    <main class="panel">
+        <header>
+            <p class="eyebrow">TicTacToeA · диагностика</p>
+            <h1>Тест WebRTC</h1>
+            <p class="intro">Откройте эту страницу на двух устройствах и запустите поиск на обоих.</p>
+        </header>
+
+        <section class="card" aria-labelledby="connection-heading">
+            <h2 id="connection-heading">Соединение</h2>
+            <p id="connection-status" class="status" role="status" aria-live="polite">Ожидание запуска</p>
+            <dl class="identities">
+                <div><dt>Мой ID</dt><dd id="own-id">—</dd></div>
+                <div><dt>ID второго клиента</dt><dd id="peer-id">—</dd></div>
+            </dl>
+            <div class="actions">
+                <button id="connect-button" class="primary" type="button">ВКЛ</button>
+                <button id="cancel-button" class="secondary" type="button" hidden>Отменить поиск</button>
+            </div>
+        </section>
+
+        <section class="card diagnostics" aria-labelledby="diagnostics-heading">
+            <h2 id="diagnostics-heading">Диагностика канала</h2>
+            <dl>
+                <div><dt>ICE</dt><dd id="ice-state">—</dd></div>
+                <div><dt>PeerConnection</dt><dd id="peer-state">—</dd></div>
+                <div><dt>Выбранная пара</dt><dd id="candidate-pair">—</dd></div>
+                <div><dt>Локальный кандидат</dt><dd id="local-candidate">—</dd></div>
+                <div><dt>Удалённый кандидат</dt><dd id="remote-candidate">—</dd></div>
+                <div><dt>Тип маршрута</dt><dd id="connection-type">—</dd></div>
+            </dl>
+        </section>
+
+        <section class="card report-card" aria-labelledby="report-heading">
+            <div class="log-heading">
+                <h2 id="report-heading">Итоговая диагностика</h2>
+                <button id="copy-report-button" class="text-button" type="button">Скопировать отчёт</button>
+            </div>
+            <p id="report-copy-status" class="report-copy-status" role="status" aria-live="polite"></p>
+            <pre id="diagnostic-summary" class="diagnostic-summary">Ожидание подключения</pre>
+            <details>
+                <summary>Снимки getStats()</summary>
+                <pre id="stats-details" class="stats-details">Пока нет данных</pre>
+            </details>
+        </section>
+
+        <section class="card" aria-labelledby="message-heading">
+            <h2 id="message-heading">Сообщение через DataChannel</h2>
+            <form id="message-form">
+                <label class="sr-only" for="message-input">Текст сообщения</label>
+                <input id="message-input" name="message" maxlength="1000" autocomplete="off" placeholder="Введите сообщение" disabled>
+                <button id="send-button" class="primary" type="submit" disabled>Отправить</button>
+            </form>
+        </section>
+
+        <section class="card log-card" aria-labelledby="log-heading">
+            <div class="log-heading">
+                <h2 id="log-heading">Журнал событий</h2>
+                <button id="clear-log-button" class="text-button" type="button">Очистить</button>
+            </div>
+            <ol id="event-log" aria-live="polite" aria-relevant="additions"></ol>
+        </section>
+    </main>
+</body>
+</html>

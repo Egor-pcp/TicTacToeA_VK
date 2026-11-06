@@ -1,0 +1,46 @@
+# Dependencies and generated output
+**/node_modules/
+/dist/
+/build/
+/coverage/
+
+# Operating system files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*~
+*.swp
+*.swo
+
+# Local editor state (keep shared workspace recommendations)
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Environment secrets and private credentials
+.env
+.env.*
+!.env.example
+!.env.*.example
+.dev.vars
+.dev.vars.*
+*.pem
+*.key
+*.p12
+*.pfx
+secrets.json
+credentials.json
+
+# Local Cloudflare Wrangler state
+.wrangler/
+
+# Backups
+/backup-lesson-3/
+/backup-lesson-6/
+*.bak
+*.backup
