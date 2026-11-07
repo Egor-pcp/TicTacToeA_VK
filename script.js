@@ -12,8 +12,7 @@ import {
     getCategoryStats,
     getOrCreatePlayerId
 } from "./player-stats.js";
-import { OnlineClient } from "./webrtc-prototype/public/online-client.js";
-import { ONLINE_CONFIG } from "./webrtc-prototype/public/online-config.js";
+import { OnlineServerClient } from "./OnlineServerClient.js";
 
 const playerId = getOrCreatePlayerId();
 window.addEventListener("tictactoe:match-completed", event => {
@@ -57,8 +56,7 @@ let activeMatch = null;
 let matchIdFallbackCounter = 0;
 let gameMode = "computer";
 let onlineState = "idle";
-let onlineClient = null;
-let onlineClientCleanupPromise = Promise.resolve();
+let onlineServerClient = null;
 let onlineStartRequestId = 0;
 let onlineStartPending = false;
 let onlinePeerId = null;
@@ -449,11 +447,21 @@ function updateInterface() {
     }
     statusText.classList.toggle("is-online-searching", onlinePractice);
 
-    restartButton.textContent = gameStarted || gameOver ? "↻ Новая игра" : "Начать игру";
-    restartButton.disabled = gameMode === "online" && !(
-        onlineState === "searching" ||
-        (onlineState === "ready" && gameOver && onlineMatch?.completed && !onlineMatch.localRematchRequested)
-    );
+    if (gameMode === "online") {
+        if (onlineState === "searching") {
+            restartButton.textContent = "✕ Отменить поиск";
+            restartButton.disabled = false;
+        } else if (gameOver) {
+            restartButton.textContent = "🔍 Новый поиск";
+            restartButton.disabled = false;
+        } else {
+            restartButton.textContent = "В игре";
+            restartButton.disabled = true;
+        }
+    } else {
+        restartButton.textContent = gameStarted || gameOver ? "↻ Новая игра" : "Начать игру";
+        restartButton.disabled = false;
+    }
 
     players.forEach((player, index) => {
         const isActive =
@@ -565,21 +573,15 @@ function handleCellClick(event) {
     if (board[index] !== "") return;
 
     if (isOnlineMatch) {
-        const sequence = onlineMatch.moveNumber + 1;
-        try {
-            sendOnlinePacket("move", {
-                gameId: onlineMatch.gameId,
-                round: onlineMatch.round,
-                sequence,
-                player: onlineMatch.localSide,
-                index
-            });
-        } catch (error) {
-            handleOnlineProtocolFailure(error.message);
+        if (currentPlayer !== onlineMatch.localSide) {
             return;
         }
-        onlineMatch.moveNumber = sequence;
-        applyOnlineMove(index, onlineMatch.localSide, false);
+        try {
+            onlineServerClient.makeMove(index);
+            cells[index].disabled = true;
+        } catch (error) {
+            console.error("Не удалось отправить ход на сервер:", error);
+        }
         return;
     }
 
@@ -743,222 +745,11 @@ function handleOnlineError(message, error) {
     updateTimerDisplay();
 }
 
-function scheduleOnlineClientCleanup(client) {
-    onlineClientCleanupPromise = onlineClientCleanupPromise
-        .catch(() => {})
-        .then(() => client.dispose())
-        .catch(error => {
-            console.error("Не удалось завершить онлайн-клиент", error);
-        });
-    return onlineClientCleanupPromise;
-}
 
-function sendOnlinePacket(type, fields = {}) {
-    if (!onlineClient?.isDataChannelOpen || !onlineMatch?.matchId) {
-        throw new Error("Нет активного игрового соединения");
-    }
-    onlineClient.send({
-        protocol: ONLINE_GAME_PROTOCOL,
-        type,
-        matchId: onlineMatch.matchId,
-        ...fields
-    });
-}
 
-function activateOnlineRound({ gameId, round, size, difficulty }) {
-    onlineMatch.gameId = gameId;
-    onlineMatch.round = round;
-    onlineMatch.moveNumber = 0;
-    onlineMatch.boardSize = size;
-    onlineMatch.difficulty = difficulty;
-    onlineMatch.started = true;
-    onlineMatch.startPending = false;
-    onlineMatch.completed = false;
-    onlineMatch.localRematchRequested = false;
-    onlineMatch.peerRematchRequested = false;
-    onlineMatch.rematchStarted = false;
-    onlineResultMessage = "";
 
-    boardSize = size;
-    board = Array(boardSize * boardSize).fill("");
-    gameDifficulty = difficulty;
-    currentPlayer = "X";
-    gameOver = false;
-    gameStarted = true;
-    activeMatch = createActiveMatch("online", { id: gameId, boardSize, difficulty });
-    renderBoard();
-    onlinePracticeClockStarted = false;
-    resetMatchTimers(onlineMatch.localSide === "X" ? "X" : null);
-    updateInterface();
-    updateTimerDisplay();
-}
 
-function sendOnlineGameStart(round = 1, gameId = createMatchId()) {
-    if (!onlineMatch || onlineMatch.localSide !== "X" || !onlineClient?.isDataChannelOpen) return;
-    const settings = {
-        gameId,
-        round,
-        size: selectedBoardSize,
-        difficulty: selectedDifficulty
-    };
-    onlineMatch.gameId = settings.gameId;
-    onlineMatch.round = settings.round;
-    onlineMatch.boardSize = settings.size;
-    onlineMatch.difficulty = settings.difficulty;
-    onlineMatch.startPending = true;
-    onlineMatch.started = false;
-    try {
-        sendOnlinePacket("game-start", {
-            gameId: settings.gameId,
-            round: settings.round,
-            boardSize: settings.size,
-            difficulty: settings.difficulty
-        });
-    } catch (error) {
-        onlineMatch.startPending = false;
-        handleOnlineProtocolFailure(error.message);
-        return;
-    }
-    statusText.textContent = "Согласуем начало партии…";
-    updateInterface();
-}
 
-function handleOnlinePacket(data) {
-    let packet;
-    try {
-        if (typeof data !== "string" || data.length > 8192) throw new Error("Недопустимый размер игрового сообщения");
-        packet = JSON.parse(data);
-    } catch (error) {
-        handleOnlineProtocolFailure(`Некорректное игровое сообщение: ${error.message}`);
-        return;
-    }
-    if (!packet || packet.protocol !== ONLINE_GAME_PROTOCOL || typeof packet.type !== "string" ||
-        typeof packet.matchId !== "string" || !onlineMatch || packet.matchId !== onlineMatch.matchId) {
-        handleOnlineProtocolFailure("Игровое сообщение не соответствует текущему соединению");
-        return;
-    }
-
-    if (packet.type === "game-start") {
-        if (onlineMatch.localSide === "O" && onlineMatch.started &&
-            packet.gameId === onlineMatch.gameId && packet.round === onlineMatch.round) {
-            sendOnlinePacket("game-start-ack", { gameId: packet.gameId, round: packet.round });
-            return;
-        }
-        const expectedRound = onlineMatch.round === 0 ? 1 : onlineMatch.round + 1;
-        const isRematch = onlineMatch.round > 0;
-        if (onlineMatch.localSide !== "O" || typeof packet.gameId !== "string" ||
-            packet.gameId.length === 0 || packet.round !== expectedRound ||
-            !ONLINE_BOARD_SIZES.has(packet.boardSize) || !ONLINE_DIFFICULTIES.has(packet.difficulty) ||
-            (isRematch && (!onlineMatch.completed || !onlineMatch.localRematchRequested ||
-                !onlineMatch.peerRematchRequested))) {
-            handleOnlineProtocolFailure("Соперник прислал недопустимые параметры партии");
-            return;
-        }
-        activateOnlineRound({
-            gameId: packet.gameId,
-            round: packet.round,
-            size: packet.boardSize,
-            difficulty: packet.difficulty
-        });
-        sendOnlinePacket("game-start-ack", { gameId: packet.gameId, round: packet.round });
-        return;
-    }
-
-    if (packet.type === "game-start-ack") {
-        if (onlineMatch.localSide !== "X" || !onlineMatch.startPending ||
-            packet.gameId !== onlineMatch.gameId || packet.round !== onlineMatch.round) return;
-        activateOnlineRound({
-            gameId: onlineMatch.gameId,
-            round: onlineMatch.round,
-            size: onlineMatch.boardSize,
-            difficulty: onlineMatch.difficulty
-        });
-        return;
-    }
-
-    if (packet.type === "disconnect") {
-        handleOnlineError("Соперник завершил соединение.");
-        return;
-    }
-
-    if (packet.type === "rematch") {
-        if (!onlineMatch.completed || packet.gameId !== onlineMatch.gameId ||
-            packet.round !== onlineMatch.round) return;
-        onlineMatch.peerRematchRequested = true;
-        maybeStartOnlineRematch();
-        updateInterface();
-        return;
-    }
-
-    if (packet.gameId !== onlineMatch.gameId || packet.round !== onlineMatch.round) return;
-
-    if (packet.type === "move") {
-        if (!onlineMatch.started || onlineMatch.completed ||
-            packet.sequence <= onlineMatch.moveNumber) return;
-        const remoteSide = onlineMatch.localSide === "X" ? "O" : "X";
-        if (packet.sequence !== onlineMatch.moveNumber + 1 || packet.player !== remoteSide ||
-            packet.player !== currentPlayer || !Number.isInteger(packet.index) ||
-            packet.index < 0 || packet.index >= board.length || board[packet.index] !== "") {
-            handleOnlineProtocolFailure("Соперник прислал недопустимый ход");
-            return;
-        }
-        onlineMatch.moveNumber = packet.sequence;
-        applyOnlineMove(packet.index, packet.player, true);
-        return;
-    }
-
-    if (packet.type === "game-over") {
-        if (!onlineMatch.completed || packet.sequence !== onlineMatch.moveNumber) return;
-        const winningCombination = getWinningCombination(board);
-        const actualWinner = winningCombination ? board[winningCombination[0]] : null;
-        const actualDraw = !winningCombination && isDrawPosition(board);
-        const remoteSide = onlineMatch.localSide === "X" ? "O" : "X";
-        const expectedRemoteResult = actualDraw ? "draw" : actualWinner === remoteSide ? "win" : "loss";
-        if ((!winningCombination && !actualDraw) || packet.winner !== actualWinner ||
-            packet.result !== expectedRemoteResult) {
-            handleOnlineProtocolFailure("Результат соперника не совпадает с состоянием поля");
-        }
-        return;
-    }
-
-    handleOnlineProtocolFailure("Неизвестный тип игрового сообщения");
-}
-
-function maybeStartOnlineRematch() {
-    if (!onlineMatch?.completed || !onlineMatch.localRematchRequested ||
-        !onlineMatch.peerRematchRequested || onlineMatch.rematchStarted) return;
-    onlineMatch.rematchStarted = true;
-    if (onlineMatch.localSide === "X") {
-        sendOnlineGameStart(onlineMatch.round + 1);
-    }
-}
-
-function requestOnlineRematch() {
-    if (!onlineMatch?.completed || onlineMatch.localRematchRequested) return;
-    onlineMatch.localRematchRequested = true;
-    try {
-        sendOnlinePacket("rematch", {
-            gameId: onlineMatch.gameId,
-            round: onlineMatch.round
-        });
-        maybeStartOnlineRematch();
-    } catch (error) {
-        handleOnlineProtocolFailure(error.message);
-    }
-    updateInterface();
-}
-
-function handleOnlineProtocolFailure(message) {
-    if (onlineClient?.isDataChannelOpen && onlineMatch?.matchId) {
-        try {
-            sendOnlinePacket("disconnect", { message: String(message).slice(0, 200) });
-        } catch {
-            // The channel may already be closing.
-        }
-    }
-    handleOnlineError(message);
-    onlineClient?.cancel();
-}
 
 function abandonActiveOnlineMatch() {
     if (activeMatch?.mode !== "online") return false;
@@ -975,13 +766,11 @@ async function startOnlineSearch() {
     const requestId = ++onlineStartRequestId;
     onlineStartPending = true;
     stopSearchTimer();
-    if (onlineClient) {
-        const previousClient = onlineClient;
-        onlineClient = null;
-        scheduleOnlineClientCleanup(previousClient);
+
+    if (onlineServerClient) {
+        onlineServerClient.dispose();
+        onlineServerClient = null;
     }
-    await onlineClientCleanupPromise;
-    if (requestId !== onlineStartRequestId) return;
 
     prepareOnlineSearch();
     gameMode = "online";
@@ -992,15 +781,9 @@ async function startOnlineSearch() {
     onlineMatch = null;
     onlineResultMessage = "";
 
-    let client;
-    try {
-        client = new OnlineClient(ONLINE_CONFIG);
-    } catch (error) {
-        handleOnlineError(error.message);
-        return;
-    }
-    onlineClient = client;
-    const isCurrentClient = () => onlineClient === client;
+    const client = new OnlineServerClient();
+    onlineServerClient = client;
+    const isCurrentClient = () => onlineServerClient === client && requestId === onlineStartRequestId;
 
     client.on("searching", () => {
         if (!isCurrentClient()) return;
@@ -1010,65 +793,162 @@ async function startOnlineSearch() {
         updateTimerDisplay();
     });
 
-    client.on("matchfound", ({ peerId }) => {
+    client.on("match_start", data => {
         if (!isCurrentClient()) return;
         stopSearchTimer();
-        onlinePeerId = peerId;
+        onlinePeerId = data.opponent?.name || `Игрок ${data.opponent?.id?.slice(-4) || ""}`;
         onlineState = "connecting";
         startTimerDisplay();
         updateInterface();
         updateTimerDisplay();
     });
 
-    client.on("datachannelopen", ({ peerId }) => {
+    client.on("snapshot", snapshot => {
         if (!isCurrentClient()) return;
-        onlinePeerId = peerId ?? onlinePeerId;
         onlineState = "ready";
-        const match = client.match;
-        if (!match?.matchId || !match.peerId) {
-            handleOnlineProtocolFailure("Клиент не получил параметры найденной пары");
-            return;
-        }
+        onlinePeerId = snapshot.opponent?.name || `Игрок ${snapshot.opponent?.id?.slice(-4) || ""}`;
+
+        boardSize = snapshot.boardSize;
+        board = [...snapshot.board];
+        renderBoard();
+
+        // Отображаем уже сделанные ходы
+        board.forEach((mark, idx) => {
+            if (mark) {
+                cells[idx].textContent = mark;
+                cells[idx].disabled = true;
+                cells[idx].classList.add(mark === "X" ? "mark-x" : "mark-o");
+            }
+        });
+
         onlineMatch = {
-            matchId: match.matchId,
-            peerId: match.peerId,
-            localSide: match.initiator ? "X" : "O",
-            gameId: null,
-            round: 0,
-            moveNumber: 0,
-            started: false,
-            startPending: false,
-            completed: false,
-            localRematchRequested: false,
-            peerRematchRequested: false,
-            rematchStarted: false
+            matchId: snapshot.matchId,
+            localSide: snapshot.role,
+            started: true,
+            completed: snapshot.status === "completed",
+            opponentName: onlinePeerId
         };
-        if (onlineMatch.localSide === "X") sendOnlineGameStart();
+
+        currentPlayer = snapshot.turn;
+        gameOver = snapshot.status === "completed";
+        gameStarted = true;
+        activeMatch = createActiveMatch("online", { id: snapshot.matchId, boardSize });
+
+        resetMatchTimers(snapshot.turn);
+        startTimerDisplay();
         updateInterface();
         updateTimerDisplay();
     });
 
-    client.on("message", ({ data }) => {
-        if (isCurrentClient()) handleOnlinePacket(data);
+    client.on("move_applied", data => {
+        if (!isCurrentClient()) return;
+        timerState.stopTurn(data.role);
+        showMove(data.index, data.role);
+        currentPlayer = data.nextTurn;
+        if (currentPlayer === onlineMatch?.localSide) {
+            timerState.startTurn(currentPlayer);
+        }
+        updateInterface();
+        updateTimerDisplay();
+    });
+
+    client.on("invalid_move", data => {
+        if (!isCurrentClient()) return;
+        statusText.textContent = `Ход отклонён: ${data.reason}`;
+        updateInterface();
+    });
+
+    client.on("opponent_disconnected", data => {
+        if (!isCurrentClient()) return;
+        const sec = Math.round((data.gracePeriodMs || 15000) / 1000);
+        statusText.textContent = `Соперник отключился. Ожидание (${sec} с)…`;
+        updateInterface();
+    });
+
+    client.on("opponent_reconnected", () => {
+        if (!isCurrentClient()) return;
+        statusText.textContent = "Соперник вернулся! Игра продолжается.";
+        updateInterface();
+    });
+
+    client.on("match_ended", data => {
+        if (!isCurrentClient()) return;
+        timerState.finish();
+        gameOver = true;
+        stopTimerDisplay();
+
+        if (Array.isArray(data.board)) {
+            data.board.forEach((mark, idx) => {
+                if (mark && board[idx] !== mark) {
+                    showMove(idx, mark);
+                }
+            });
+        }
+
+        if (Array.isArray(data.winningLine)) {
+            data.winningLine.forEach(idx => {
+                if (cells[idx]) cells[idx].classList.add("winner");
+            });
+        }
+
+        let message = "";
+        let outcome = "loss";
+        if (data.winner === "draw") {
+            message = "Ничья!";
+            outcome = "draw";
+        } else if (data.winner === onlineMatch?.localSide) {
+            if (data.reason === "timeout") {
+                message = "Ты победил! (Соперник превысил время)";
+            } else if (data.reason === "abandoned") {
+                message = "Ты победил! (Соперник покинул игру)";
+            } else {
+                message = "Ты победил!";
+            }
+            outcome = "win";
+        } else {
+            if (data.reason === "timeout") {
+                message = "Поражение: время на ход истекло";
+            } else if (data.reason === "abandoned") {
+                message = "Поражение: партия покинута";
+            } else {
+                message = "Победил соперник!";
+            }
+            outcome = "loss";
+        }
+
+        statusText.textContent = message;
+        onlineResultMessage = message;
+        if (onlineMatch) {
+            onlineMatch.completed = true;
+            onlineMatch.winner = data.winner;
+        }
+
+        const finalDuration = typeof data.durationMs === "number" ? data.durationMs : timerState.finish();
+        const matchResult = createMatchResult(outcome, data.winner, finalDuration);
+        if (matchResult) {
+            window.dispatchEvent(new CustomEvent("tictactoe:match-completed", { detail: matchResult }));
+        }
+
+        updateInterface();
+        updateTimerDisplay();
     });
 
     client.on("error", ({ message, error }) => {
         if (isCurrentClient()) handleOnlineError(message, error);
     });
 
-    client.on("peerleft", () => {
-        if (isCurrentClient()) handleOnlineError("Соперник отключился. Можно начать поиск снова.");
+    client.on("search_canceled", () => {
+        if (isCurrentClient()) switchToComputer("Поиск отменён");
     });
 
-    client.on("connectionlost", ({ wasActive }) => {
-        if (isCurrentClient() && wasActive) {
-            handleOnlineError("Соединение с сервером поиска потеряно.");
-        }
-    });
-
-    client.search().catch(error => {
+    try {
+        const profile = {
+            name: client.devUser === "dev_user_2" ? "Игрок 2" : "Игрок 1"
+        };
+        await client.startSearch(selectedBoardSize, profile);
+    } catch (error) {
         if (isCurrentClient()) handleOnlineError(error.message);
-    });
+    }
 
     updateInterface();
     updateTimerDisplay();
@@ -1078,20 +958,14 @@ function switchToComputer(notice = "") {
     onlineStartRequestId += 1;
     onlineStartPending = false;
     stopSearchTimer();
-    const client = onlineClient;
-    if (client) {
-        if (client.isDataChannelOpen && onlineMatch?.matchId) {
-            try {
-                sendOnlinePacket("disconnect", { message: "Игрок вышел из онлайн-режима" });
-            } catch {
-                // The connection may have closed already.
-            }
+
+    if (onlineServerClient) {
+        if (onlineState === "searching") {
+            onlineServerClient.cancelSearch();
+        } else {
+            onlineServerClient.dispose();
         }
-    }
-    onlineClient = null;
-    if (client) {
-        client.cancel();
-        scheduleOnlineClientCleanup(client);
+        onlineServerClient = null;
     }
 
     onlinePeerId = null;
@@ -1151,7 +1025,10 @@ function startGame() {
 
 function restartGame() {
     if (gameMode === "online") {
-        if (onlineState === "ready" && onlineMatch?.completed) requestOnlineRematch();
+        if (onlineState === "ready" && onlineMatch?.completed) {
+            startOnlineSearch();
+            return;
+        }
         if (onlineState !== "searching") return;
         cancelComputerMoveTimer();
         applySelectedBoardSizeToNewGame();
@@ -1189,6 +1066,18 @@ renderPreviousResult();
 updateTimerDisplay();
 
 restartButton.addEventListener("click", () => {
+    if (gameMode === "online") {
+        if (onlineState === "searching") {
+            switchToComputer("Поиск отменён");
+            return;
+        }
+        if (gameOver) {
+            startOnlineSearch();
+            return;
+        }
+        return;
+    }
+
     if (!gameStarted && !gameOver) {
         startGame();
         return;
@@ -1610,5 +1499,59 @@ function runTimerTests() {
 }
 
 window.runTimerTests = runTimerTests;
+
+function renderDevModeBadge() {
+    if (typeof window === "undefined" || !document.body) return;
+
+    // Не отображаем в боевой среде VK Mini Apps
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("vk_user_id") || params.get("vk_app_id")) {
+        return;
+    }
+
+    const currentDevUser = params.get("dev_user") || sessionStorage.getItem("tictactoe_dev_user") || "dev_user_1";
+    const nextDevUser = currentDevUser === "dev_user_1" ? "dev_user_2" : "dev_user_1";
+
+    let badge = document.querySelector("#dev-mode-badge");
+    if (!badge) {
+        badge = document.createElement("div");
+        badge.id = "dev-mode-badge";
+        badge.className = "dev-badge";
+        const heading = document.querySelector(".tab-heading");
+        if (heading && heading.parentNode) {
+            heading.parentNode.insertBefore(badge, heading.nextSibling);
+        }
+    }
+
+    badge.innerHTML = `
+        <span>🔧 <strong>Dev-режим:</strong> <code>${currentDevUser}</code></span>
+        <button type="button" id="switch-dev-user-btn" title="Переключить тестового игрока">Сменить на ${nextDevUser}</button>
+    `;
+
+    document.querySelector("#switch-dev-user-btn")?.addEventListener("click", () => {
+        sessionStorage.setItem("tictactoe_dev_user", nextDevUser);
+        const newUrl = new URL(window.location.href);
+        newUrl.searchParams.set("dev_user", nextDevUser);
+        window.location.href = newUrl.href;
+    });
+}
+
+// Инициализация при загрузке: отображение Dev-бейджа и проверка Reconnect
+(async function initClientEnvironment() {
+    renderDevModeBadge();
+
+    const tempClient = new OnlineServerClient();
+    try {
+        const restored = await tempClient.checkAndRestoreSession();
+        if (restored) {
+            console.log("Восстановлена активная онлайн-сессия после перезагрузки страницы");
+            onlineServerClient = tempClient;
+            gameMode = "online";
+            onlineState = "connecting";
+            updateModeButtons();
+            updateInterface();
+        }
+    } catch {}
+})();
 
 updateInterface();

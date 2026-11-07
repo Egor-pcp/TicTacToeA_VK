@@ -198,7 +198,9 @@
 
     <script>
         globalThis.TICTACTOE_ONLINE_CONFIG ??= {
-            signalingUrl: "wss://fancy-math-9ab8.egorpcp.workers.dev/ws"
+            serverUrl: (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1" || !window.location.hostname)
+                ? "http://localhost:8787"
+                : "https://tictactoe-vk-server.egorpcp.workers.dev"
         };
     </script>
     <script type="module" src="script.js"></script>

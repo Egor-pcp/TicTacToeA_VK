@@ -296,7 +296,8 @@ export class Match {
             winner,
             reason,
             winningLine: winningLine || undefined,
-            durationMs
+            durationMs,
+            board: this.board
         });
 
         // Идемпотентное сохранение в Cloudflare D1

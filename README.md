@@ -15,8 +15,15 @@
 - **Сетевой прототип (`webrtc-prototype/`):** Cloudflare Worker, Durable Objects (SQLite), WebSocket, WebRTC DataChannel.
 
 ## Требования и запуск
-1. **Основная игра:** любой современный браузер. Запуск через любой локальный HTTP-сервер (например, `npx serve`, Live Server или Python `python -m http.server`), раздающий корень репозитория.
-2. **Сетевой прототип:** Node.js >= 22, npm. Запуск описан в [webrtc-prototype/README.md](./webrtc-prototype/README.md).
+1. **Основная игра и локальный мультиплеер (Development Mode):**
+   - Запустите сервер: `cd server && npx wrangler dev` (сервер запустится на `http://localhost:8787`);
+   - Запустите локальный статический сервер из корня проекта (например, `npx serve .` или `python -m http.server 3000`);
+   - Откройте две вкладки браузера:
+     - Окно 1: `http://localhost:3000/?dev_user=dev_user_1`
+     - Окно 2: `http://localhost:3000/?dev_user=dev_user_2`
+   - В обоих окнах нажмите «Онлайн» → «Начать поиск» — игроки мгновенно объединятся в партию через сервер!
+   - Также в шапке игры доступна кнопка быстрого переключения Dev-пользователя.
+2. **Сетевой WebRTC-прототип:** сохранён в каталоге [webrtc-prototype/README.md](./webrtc-prototype/README.md) как эталон.
 
 ## Структура проекта
 ```text
@@ -24,13 +31,14 @@ TicTacToeA_VK/
 ├── index.html                  # Главная страница и разметка интерфейса
 ├── style.css                   # Стили и адаптивная верстка
 ├── script.js                   # Координатор UI, таймеров и игрового процесса
+├── OnlineServerClient.js       # Клиентский сетевой модуль (WebSocket, Matchmaker, Match DO)
 ├── game-logic.js               # Игровая логика, правила победы и ИИ
 ├── player-stats.js             # Локальный профиль и статистика (localStorage)
 ├── my avatar.JPG               # Иллюстрация для вкладки «О проекте»
 ├── server/                     # Бэкенд онлайн-мультиплеера (Workers, D1, DO)
-│   ├── src/                    # Точка входа worker.js, vk-auth.js, token.js
+│   ├── src/                    # worker.js, matchmaker.js, match.js, game-rules.js, vk-auth.js, token.js
 │   ├── migrations/             # Схемы баз данных Cloudflare D1
-│   ├── test/                   # Автоматические тесты бэкенда
+│   ├── test/                   # Автоматические тесты бэкенда и сетевого клиента (45 тестов)
 │   └── wrangler.jsonc          # Конфигурация Cloudflare Workers
 ├── webrtc-prototype/           # Экспериментальный сетевой прототип (сохранён как эталон)
 ├── AGENTS.md                   # Постоянный регламент и правила для ИИ-агентов
