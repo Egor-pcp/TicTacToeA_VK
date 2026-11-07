@@ -196,20 +196,13 @@ async function handleWebSocket(request, env) {
 
     const url = new URL(request.url);
     const token = url.searchParams.get("token");
+    const matchId = url.searchParams.get("matchId");
     const secretKey = env?.VK_CLIENT_SECRET || env?.GAME_TOKEN_SECRET || "dev_secret_key_123";
 
     const tokenVerify = await verifyGameToken(token, secretKey);
     if (!tokenVerify.isValid) {
         return jsonResponse({ error: "Unauthorized WebSocket connection" }, 401);
     }
-
-    // Маршрутизация в Matchmaker Durable Object
-    if (!env?.MATCHMAKER) {
-        return jsonResponse({ error: "MATCHMAKER binding missing" }, 500);
-    }
-
-    const matchmakerId = env.MATCHMAKER.idFromName("global-queue");
-    const matchmaker = env.MATCHMAKER.get(matchmakerId);
 
     const modifiedRequest = new Request(request, {
         headers: {
@@ -219,40 +212,26 @@ async function handleWebSocket(request, env) {
         }
     });
 
+    // Маршрутизация в Match Durable Object (комната конкретной партии)
+    if (matchId) {
+        if (!env?.MATCH) {
+            return jsonResponse({ error: "MATCH binding missing" }, 500);
+        }
+        const matchRoomId = env.MATCH.idFromName(matchId);
+        const matchDO = env.MATCH.get(matchRoomId);
+        return matchDO.fetch(modifiedRequest);
+    }
+
+    // Маршрутизация в Matchmaker Durable Object (очередь случайного подбора)
+    if (!env?.MATCHMAKER) {
+        return jsonResponse({ error: "MATCHMAKER binding missing" }, 500);
+    }
+
+    const matchmakerId = env.MATCHMAKER.idFromName("global-queue");
+    const matchmaker = env.MATCHMAKER.get(matchmakerId);
+
     return matchmaker.fetch(modifiedRequest);
 }
 
-// Заглушка Durable Object для Matchmaker
-export class Matchmaker {
-    constructor(ctx, env) {
-        this.ctx = ctx;
-        this.env = env;
-    }
-
-    async fetch(request) {
-        const pair = new WebSocketPair();
-        const client = pair[0];
-        const server = pair[1];
-        const userId = request.headers.get("X-User-Id") || "unknown";
-
-        server.accept();
-        server.send(JSON.stringify({ type: "auth_ok", userId }));
-
-        return new Response(null, {
-            status: 101,
-            webSocket: client
-        });
-    }
-}
-
-// Заглушка Durable Object для Match (комнаты партии)
-export class Match {
-    constructor(ctx, env) {
-        this.ctx = ctx;
-        this.env = env;
-    }
-
-    async fetch(request) {
-        return new Response("Match room stub", { status: 200 });
-    }
-}
+export { Matchmaker } from "./matchmaker.js";
+export { Match } from "./match.js";

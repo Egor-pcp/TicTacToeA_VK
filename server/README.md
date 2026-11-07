@@ -11,13 +11,18 @@ server/
 ├── src/
 │   ├── worker.js           # Точка входа: роутинг HTTP (/api/auth, /api/leaderboard) и WebSocket (/ws)
 │   ├── vk-auth.js          # Валидация подписи параметров запуска VK (HMAC-SHA256 на Web Crypto API)
-│   └── token.js            # Выпуск и проверка короткоживущих сессионных токенов (HMAC-SHA256)
+│   ├── token.js            # Выпуск и проверка короткоживущих сессионных токенов (HMAC-SHA256)
+│   ├── game-rules.js       # Чистая серверная логика правил (доски 3x3, 4x4, 5x5, проверка побед и ничьих)
+│   ├── matchmaker.js       # Matchmaker DO: очередь случайного подбора игроков (FIFO, отмена, жребий 50/50)
+│   └── match.js            # Match DO: авторитетная комната матча (валидация ходов, таймеры, reconnect, D1)
 ├── migrations/
 │   └── 0001_initial.sql    # Схема таблиц Cloudflare D1 (users, match_history, leaderboards)
 ├── test/
 │   ├── vk-auth.test.js     # Unit-тесты проверки подписи параметров запуска VK
 │   ├── token.test.js       # Unit-тесты выпуска и проверки игровых токенов
-│   └── worker.test.js      # Интеграционные тесты эндпоинтов Worker (Dev-auth, VK-auth, CORS, WS)
+│   ├── game-rules.test.js  # Unit-тесты серверных правил и линий победы
+│   ├── worker.test.js      # Интеграционные тесты эндпоинтов Worker (Dev-auth, VK-auth, CORS, WS)
+│   └── multiplayer.test.js # Интеграционные тесты мультиплеера (15 сценариев очереди, матчей, reconnect, D1)
 ├── .dev.vars.example       # Пример локальных переменных окружения для Wrangler
 ├── wrangler.jsonc          # Конфигурация воркера, D1 и Durable Objects
 ├── package.json            # NPM скрипты
@@ -95,8 +100,21 @@ curl -X POST http://localhost:8787/api/auth \
 }
 ```
 
-### Подключение к WebSocket:
-- Игрок 1: `ws://localhost:8787/ws?token=<session_token_1>`
-- Игрок 2: `ws://localhost:8787/ws?token=<session_token_2>`
-
-Сервер аутентифицирует обоих игроков и связывает их соединения для случайного подбора и онлайн-партии.
+### Подключение к WebSocket и игра:
+1. Игрок 1 подключается к очереди: `ws://localhost:8787/ws?token=<session_token_1>`
+2. Игрок 2 подключается к очереди: `ws://localhost:8787/ws?token=<session_token_2>`
+3. Оба отправляют команду поиска матча:
+   ```json
+   {"type": "find_match", "boardSize": 3, "profile": {"name": "Игрок 1"}}
+   ```
+4. Matchmaker DO находит пару, бросает жребий 50/50 X/O и отправляет обоим:
+   ```json
+   {"type": "match_start", "matchId": "<uuid>", "role": "X", "boardSize": 3, "turn": "X", "turnDeadlineMs": 30000, "opponent": {...}}
+   ```
+5. Игроки переподключаются к комнате матча:
+   `ws://localhost:8787/ws?token=<session_token>&matchId=<uuid>`
+6. Игрок X делает ход:
+   ```json
+   {"type": "make_move", "index": 4, "seq": 1}
+   ```
+7. Сервер валидирует ход и транслирует обновлённое состояние (`move_applied` или `match_ended`).
