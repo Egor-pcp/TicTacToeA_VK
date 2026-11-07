@@ -652,6 +652,67 @@ body {
     font-weight: 700;
 }
 
+.leaderboard-top-1 td:first-child {
+    color: #b45309;
+}
+
+.leaderboard-top-2 td:first-child {
+    color: #4b5563;
+}
+
+.leaderboard-top-3 td:first-child {
+    color: #92400e;
+}
+
+.leaderboard-current-user {
+    background: #e8f0fe;
+    font-weight: 600;
+}
+
+.leaderboard-user-cell {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.leaderboard-avatar {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    vertical-align: middle;
+}
+
+.leaderboard-status-cell {
+    text-align: center !important;
+    color: #777b86;
+    font-size: 14px;
+    padding: 16px 12px !important;
+}
+
+.leaderboard-retry-btn {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 3px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    color: #171923;
+    background: #e2e8f0;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.leaderboard-retry-btn:hover {
+    background: #cbd5e1;
+}
+
 @media (max-width: 480px) {
     body {
         padding: 12px 8px;

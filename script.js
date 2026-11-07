@@ -10,13 +10,23 @@ import {
 import {
     addCompletedMatch,
     getCategoryStats,
-    getOrCreatePlayerId
+    getOrCreatePlayerId,
+    getOrCreatePlayerIdentity
 } from "./player-stats.js";
 import { OnlineServerClient } from "./OnlineServerClient.js";
 
-const playerId = getOrCreatePlayerId();
+function getActiveUserId() {
+    if (typeof window === "undefined") return "dev_user_1";
+    const params = new URLSearchParams(window.location.search);
+    const vkUserId = params.get("vk_user_id");
+    if (vkUserId) return `vk_${vkUserId}`;
+    return params.get("dev_user") || sessionStorage.getItem("tictactoe_dev_user") || "dev_user_1";
+}
+
 window.addEventListener("tictactoe:match-completed", event => {
-    addCompletedMatch(event.detail);
+    const currentUserId = getActiveUserId();
+    addCompletedMatch(event.detail, { userId: currentUserId });
+    leaderboardDirty = true;
     renderStats();
 });
 
@@ -35,6 +45,7 @@ const matchTimeValue = document.querySelector(".match-time");
 const previousResultValue = document.querySelector(".previous-result");
 const statsGamesPlayedValue = document.querySelector("#stats-games-played");
 const statsBestTimeValue = document.querySelector("#stats-best-time");
+const statsRankValue = document.querySelector("#stats-rank");
 const statsPlayerIdValue = document.querySelector("#stats-player-id");
 const leaderboardRows = document.querySelector("#leaderboard-rows");
 
@@ -222,25 +233,184 @@ function syncStatsFiltersFromGameSettings() {
     updateStatsFilterButtons();
 }
 
+let leaderboardCache = null;
+let leaderboardInFlightPromise = null;
+let leaderboardDirty = true;
+let leaderboardFetchError = false;
+
+function getServerUrl() {
+    if (typeof window !== "undefined") {
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get("server")) return urlParams.get("server");
+        if (window.TICTACTOE_ONLINE_CONFIG?.serverUrl) return window.TICTACTOE_ONLINE_CONFIG.serverUrl;
+        const hostname = window.location.hostname;
+        if (hostname === "localhost" || hostname === "127.0.0.1" || !hostname) {
+            return "http://localhost:8787";
+        }
+    }
+    return "https://tictactoe-vk-server.egorpcp.workers.dev";
+}
+
+async function fetchLeaderboard({ force = false } = {}) {
+    if (!force && !leaderboardDirty && leaderboardCache) {
+        return leaderboardCache;
+    }
+
+    if (leaderboardInFlightPromise) {
+        return leaderboardInFlightPromise;
+    }
+
+    leaderboardInFlightPromise = (async () => {
+        try {
+            const serverUrl = getServerUrl();
+            const res = await fetch(`${serverUrl}/api/leaderboard`, { method: "GET" });
+            if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+            const data = await res.json();
+            const list = Array.isArray(data.leaderboard) ? data.leaderboard : [];
+            leaderboardCache = list;
+            leaderboardDirty = false;
+            leaderboardFetchError = false;
+            return list;
+        } catch (err) {
+            console.warn("Failed to load leaderboard:", err);
+            leaderboardFetchError = true;
+            throw err;
+        } finally {
+            leaderboardInFlightPromise = null;
+        }
+    })();
+
+    return leaderboardInFlightPromise;
+}
+
+function renderLeaderboard(list, currentUserId) {
+    if (!leaderboardRows) return;
+    leaderboardRows.replaceChildren();
+
+    if (leaderboardFetchError && (!list || list.length === 0)) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 3;
+        cell.className = "leaderboard-status-cell";
+        cell.innerHTML = `Не удалось загрузить рейтинг. <button type="button" class="leaderboard-retry-btn" id="retry-leaderboard-btn">Повторить</button>`;
+        row.append(cell);
+        leaderboardRows.append(row);
+        document.querySelector("#retry-leaderboard-btn")?.addEventListener("click", () => {
+            loadAndRenderLeaderboard(true);
+        });
+        return;
+    }
+
+    if (!list || list.length === 0) {
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 3;
+        cell.className = "leaderboard-status-cell";
+        cell.textContent = "Рейтинг пока пуст. Сыграйте первый матч!";
+        row.append(cell);
+        leaderboardRows.append(row);
+        return;
+    }
+
+    const medals = ["🥇 1", "🥈 2", "🥉 3"];
+    const topRows = list.slice(0, 10);
+
+    topRows.forEach((item, index) => {
+        const row = document.createElement("tr");
+        const isCurrentUser = (item.vk_user_id === currentUserId) ||
+            (currentUserId === "dev_user_1" && item.vk_user_id === "dev_user_1") ||
+            (currentUserId === "dev_user_2" && item.vk_user_id === "dev_user_2") ||
+            (currentUserId === `vk_${item.vk_user_id}`);
+
+        if (index === 0) row.classList.add("leaderboard-top-1");
+        else if (index === 1) row.classList.add("leaderboard-top-2");
+        else if (index === 2) row.classList.add("leaderboard-top-3");
+
+        if (isCurrentUser) {
+            row.classList.add("leaderboard-current-user");
+        }
+
+        const placeCell = document.createElement("td");
+        placeCell.textContent = index < 3 ? medals[index] : String(index + 1);
+
+        const nameCell = document.createElement("td");
+        const userWrap = document.createElement("span");
+        userWrap.className = "leaderboard-user-cell";
+
+        if (item.avatar_url) {
+            const avatarImg = document.createElement("img");
+            avatarImg.className = "leaderboard-avatar";
+            avatarImg.src = item.avatar_url;
+            avatarImg.alt = "";
+            avatarImg.loading = "lazy";
+            userWrap.append(avatarImg);
+        }
+
+        const nameSpan = document.createElement("span");
+        let displayName = item.first_name || "";
+        if (item.last_name) displayName += ` ${item.last_name}`;
+        if (!displayName.trim()) {
+            displayName = item.vk_user_id === "dev_user_1" ? "Игрок 1 (Dev)" :
+                item.vk_user_id === "dev_user_2" ? "Игрок 2 (Dev)" :
+                `Игрок ${String(item.vk_user_id).slice(-4)}`;
+        }
+        nameSpan.textContent = displayName;
+        userWrap.append(nameSpan);
+        nameCell.append(userWrap);
+
+        const ratingCell = document.createElement("td");
+        ratingCell.textContent = String(item.rating ?? 1000);
+
+        row.append(placeCell, nameCell, ratingCell);
+        leaderboardRows.append(row);
+    });
+}
+
+async function loadAndRenderLeaderboard(force = false) {
+    if (!leaderboardRows) return;
+    const currentUserId = getActiveUserId();
+
+    if ((force || leaderboardDirty || !leaderboardCache) && (!leaderboardCache || leaderboardCache.length === 0)) {
+        leaderboardRows.replaceChildren();
+        const row = document.createElement("tr");
+        const cell = document.createElement("td");
+        cell.colSpan = 3;
+        cell.className = "leaderboard-status-cell";
+        cell.textContent = "Загрузка рейтинга…";
+        row.append(cell);
+        leaderboardRows.append(row);
+    }
+
+    try {
+        const list = await fetchLeaderboard({ force });
+        renderLeaderboard(list, currentUserId);
+
+        if (statsRankValue) {
+            const userIndex = list.findIndex(item =>
+                item.vk_user_id === currentUserId ||
+                (currentUserId === "dev_user_1" && item.vk_user_id === "dev_user_1") ||
+                (currentUserId === "dev_user_2" && item.vk_user_id === "dev_user_2") ||
+                currentUserId === `vk_${item.vk_user_id}`
+            );
+            statsRankValue.textContent = userIndex !== -1 ? String(userIndex + 1) : "—";
+        }
+    } catch {
+        renderLeaderboard(leaderboardCache, currentUserId);
+        if (statsRankValue) statsRankValue.textContent = "—";
+    }
+}
+
 function renderStats() {
-    const stats = getCategoryStats(statsFilterDifficulty, statsFilterBoardSize);
-    statsGamesPlayedValue.textContent = String(stats.gamesPlayed);
-    statsBestTimeValue.textContent = stats.bestWinMs === null
+    const currentUserId = getActiveUserId();
+    const stats = getCategoryStats(statsFilterDifficulty, statsFilterBoardSize, { userId: currentUserId });
+    if (statsGamesPlayedValue) statsGamesPlayedValue.textContent = String(stats.gamesPlayed);
+    if (statsBestTimeValue) statsBestTimeValue.textContent = stats.bestWinMs === null
         ? "—"
         : formatElapsed(stats.bestWinMs);
-    statsPlayerIdValue.textContent = playerId;
+    const identity = getOrCreatePlayerIdentity({ userId: currentUserId });
+    if (statsPlayerIdValue) statsPlayerIdValue.textContent = identity.displayId;
 
-    if (leaderboardRows.children.length !== 10) {
-        leaderboardRows.replaceChildren(...Array.from({ length: 10 }, (_, index) => {
-            const row = document.createElement("tr");
-            const place = document.createElement("td");
-            const name = document.createElement("td");
-            const time = document.createElement("td");
-            place.textContent = String(index + 1);
-            row.append(place, name, time);
-            return row;
-        }));
-    }
+    loadAndRenderLeaderboard();
 }
 
 document.querySelectorAll("[data-stats-filter-difficulty], [data-stats-filter-board-size]").forEach(button => {
@@ -1223,6 +1393,7 @@ navigationTabs.forEach(tab => {
         if (selectedPanel === "stats-view") {
             syncStatsFiltersFromGameSettings();
             renderStats();
+            loadAndRenderLeaderboard(true);
         }
     });
 });

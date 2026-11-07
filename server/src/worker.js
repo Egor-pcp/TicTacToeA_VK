@@ -84,6 +84,21 @@ async function handleAuth(request, env) {
             3600 // 1 час для локальной отладки
         );
 
+        // Гарантируем регистрацию Dev-пользователя в таблице users для внешних ключей и лидерборда
+        if (env?.DB) {
+            try {
+                const now = Date.now();
+                const devName = userId === "dev_user_2" ? "Игрок 2 (Dev)" : "Игрок 1 (Dev)";
+                await env.DB.prepare(`
+                    INSERT INTO users (vk_user_id, first_name, last_name, avatar_url, created_at, last_seen_at)
+                    VALUES (?, ?, '', NULL, ?, ?)
+                    ON CONFLICT(vk_user_id) DO UPDATE SET last_seen_at = excluded.last_seen_at
+                `).bind(userId, devName, now, now).run();
+            } catch (dbErr) {
+                console.error("D1 dev user upsert warning:", dbErr);
+            }
+        }
+
         return jsonResponse({
             token,
             userId,
@@ -172,10 +187,12 @@ async function handleLeaderboard(request, env) {
                 l.rating,
                 l.games_played,
                 l.wins,
+                l.losses,
+                l.draws,
                 l.best_win_time_ms
             FROM leaderboards l
             LEFT JOIN users u ON l.vk_user_id = u.vk_user_id
-            ORDER BY l.rating DESC
+            ORDER BY l.rating DESC, l.wins DESC, l.games_played ASC, l.vk_user_id ASC
             LIMIT 10
         `).all();
 

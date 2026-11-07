@@ -4,6 +4,22 @@ export const PLAYER_PROFILE_STORAGE_KEY = "tictactoe.player-profile.v1";
 export const PLAYER_STATS_STORAGE_KEY = "tictactoe.player-stats.v1";
 export const PLAYER_STATS_SCHEMA_VERSION = 1;
 
+export function getPlayerStatsStorageKey(userId) {
+    if (!userId) return PLAYER_STATS_STORAGE_KEY;
+    const clean = String(userId).trim();
+    if (!clean) return PLAYER_STATS_STORAGE_KEY;
+    const prefix = clean.startsWith("vk_") ? clean : `vk_${clean}`;
+    return `tictactoe.${prefix}.stats.v1`;
+}
+
+export function getPlayerProfileStorageKey(userId) {
+    if (!userId) return PLAYER_PROFILE_STORAGE_KEY;
+    const clean = String(userId).trim();
+    if (!clean) return PLAYER_PROFILE_STORAGE_KEY;
+    const prefix = clean.startsWith("vk_") ? clean : `vk_${clean}`;
+    return `tictactoe.${prefix}.profile.v1`;
+}
+
 const DIFFICULTIES = ["easy", "medium", "hard"];
 const BOARD_SIZES = [3, 4, 5];
 let fallbackIdentityCounter = 0;
@@ -58,7 +74,7 @@ function isValidProfile(value) {
         typeof value === "object" &&
         value.schemaVersion === 1 &&
         typeof value.displayId === "string" &&
-        /^ID_\d{10}$/.test(value.displayId) &&
+        value.displayId.length > 0 &&
         typeof value.identityKey === "string" &&
         value.identityKey.length > 0;
 }
@@ -73,23 +89,31 @@ function preserveCorruptValue(storage, key, raw) {
     }
 }
 
-function createProfile(now) {
+function createProfile(now, userId) {
     const date = now instanceof Date ? now : new Date(now);
+    let displayId;
+    if (userId) {
+        const clean = String(userId).trim();
+        displayId = clean.startsWith("vk_") ? clean : `vk_${clean}`;
+    } else {
+        displayId = formatDisplayId(date);
+    }
     return Object.freeze({
         schemaVersion: 1,
-        displayId: formatDisplayId(date),
+        displayId,
         identityKey: randomToken()
     });
 }
 
-export function getOrCreatePlayerIdentity({ storage, now = () => new Date() } = {}) {
+export function getOrCreatePlayerIdentity({ storage, userId, now = () => new Date() } = {}) {
     const targetStorage = resolveStorage(storage);
+    const storageKey = getPlayerProfileStorageKey(userId);
     let raw = null;
 
     try {
-        raw = targetStorage.getItem(PLAYER_PROFILE_STORAGE_KEY);
+        raw = targetStorage.getItem(storageKey);
     } catch {
-        return createProfile(typeof now === "function" ? now() : now);
+        return createProfile(typeof now === "function" ? now() : now, userId);
     }
 
     if (raw !== null) {
@@ -106,14 +130,14 @@ export function getOrCreatePlayerIdentity({ storage, now = () => new Date() } = 
             // Preserve malformed profile data below before replacing this key.
         }
 
-        if (!preserveCorruptValue(targetStorage, PLAYER_PROFILE_STORAGE_KEY, raw)) {
-            return createProfile(typeof now === "function" ? now() : now);
+        if (!preserveCorruptValue(targetStorage, storageKey, raw)) {
+            return createProfile(typeof now === "function" ? now() : now, userId);
         }
     }
 
-    const profile = createProfile(typeof now === "function" ? now() : now);
+    const profile = createProfile(typeof now === "function" ? now() : now, userId);
     try {
-        targetStorage.setItem(PLAYER_PROFILE_STORAGE_KEY, JSON.stringify(profile));
+        targetStorage.setItem(storageKey, JSON.stringify(profile));
     } catch {
         // Return a usable in-memory identity if persistent storage is blocked.
     }
@@ -163,27 +187,28 @@ function emptyStore() {
     return { schemaVersion: PLAYER_STATS_SCHEMA_VERSION, matches: [] };
 }
 
-function loadStore(storage) {
+function loadStore(storage, userId) {
+    const key = getPlayerStatsStorageKey(userId);
     let raw;
     try {
-        raw = storage.getItem(PLAYER_STATS_STORAGE_KEY);
+        raw = storage.getItem(key);
     } catch {
-        return { store: emptyStore(), writable: false };
+        return { store: emptyStore(), writable: false, key };
     }
 
-    if (raw === null) return { store: emptyStore(), writable: true };
+    if (raw === null) return { store: emptyStore(), writable: true, key };
 
     let parsed;
     try {
         parsed = JSON.parse(raw);
     } catch {
-        const preserved = preserveCorruptValue(storage, PLAYER_STATS_STORAGE_KEY, raw);
-        if (!preserved) return { store: emptyStore(), writable: false };
+        const preserved = preserveCorruptValue(storage, key, raw);
+        if (!preserved) return { store: emptyStore(), writable: false, key };
         try {
-            storage.setItem(PLAYER_STATS_STORAGE_KEY, JSON.stringify(emptyStore()));
-            return { store: emptyStore(), writable: true };
+            storage.setItem(key, JSON.stringify(emptyStore()));
+            return { store: emptyStore(), writable: true, key };
         } catch {
-            return { store: emptyStore(), writable: false };
+            return { store: emptyStore(), writable: false, key };
         }
     }
 
@@ -195,41 +220,41 @@ function loadStore(storage) {
             return true;
         }).map(copyMatch);
         const hasInvalidEntries = validMatches.length !== parsed.matches.length;
-        if (!hasInvalidEntries) return { store: { schemaVersion: PLAYER_STATS_SCHEMA_VERSION, matches: validMatches }, writable: true };
+        if (!hasInvalidEntries) return { store: { schemaVersion: PLAYER_STATS_SCHEMA_VERSION, matches: validMatches }, writable: true, key };
 
-        if (!preserveCorruptValue(storage, PLAYER_STATS_STORAGE_KEY, raw)) {
-            return { store: { schemaVersion: PLAYER_STATS_SCHEMA_VERSION, matches: validMatches }, writable: false };
+        if (!preserveCorruptValue(storage, key, raw)) {
+            return { store: { schemaVersion: PLAYER_STATS_SCHEMA_VERSION, matches: validMatches }, writable: false, key };
         }
         const repaired = { schemaVersion: PLAYER_STATS_SCHEMA_VERSION, matches: validMatches };
         try {
-            storage.setItem(PLAYER_STATS_STORAGE_KEY, JSON.stringify(repaired));
-            return { store: repaired, writable: true };
+            storage.setItem(key, JSON.stringify(repaired));
+            return { store: repaired, writable: true, key };
         } catch {
-            return { store: repaired, writable: false };
+            return { store: repaired, writable: false, key };
         }
     }
 
-    if (!preserveCorruptValue(storage, PLAYER_STATS_STORAGE_KEY, raw)) {
-        return { store: emptyStore(), writable: false };
+    if (!preserveCorruptValue(storage, key, raw)) {
+        return { store: emptyStore(), writable: false, key };
     }
     try {
-        storage.setItem(PLAYER_STATS_STORAGE_KEY, JSON.stringify(emptyStore()));
-        return { store: emptyStore(), writable: true };
+        storage.setItem(key, JSON.stringify(emptyStore()));
+        return { store: emptyStore(), writable: true, key };
     } catch {
-        return { store: emptyStore(), writable: false };
+        return { store: emptyStore(), writable: false, key };
     }
 }
 
-export function getSavedMatches({ storage } = {}) {
-    const { store } = loadStore(resolveStorage(storage));
+export function getSavedMatches({ storage, userId } = {}) {
+    const { store } = loadStore(resolveStorage(storage), userId);
     return store.matches.map(copyMatch);
 }
 
-export function addCompletedMatch(match, { storage } = {}) {
+export function addCompletedMatch(match, { storage, userId } = {}) {
     if (!isValidMatch(match)) return false;
 
     const targetStorage = resolveStorage(storage);
-    const { store, writable } = loadStore(targetStorage);
+    const { store, writable, key } = loadStore(targetStorage, userId);
     if (!writable || store.matches.some(savedMatch => savedMatch.id === match.id)) return false;
 
     const updatedStore = {
@@ -238,7 +263,7 @@ export function addCompletedMatch(match, { storage } = {}) {
     };
 
     try {
-        targetStorage.setItem(PLAYER_STATS_STORAGE_KEY, JSON.stringify(updatedStore));
+        targetStorage.setItem(key, JSON.stringify(updatedStore));
         return true;
     } catch {
         return false;
@@ -271,15 +296,15 @@ function isValidCategory(difficulty, boardSize) {
     return DIFFICULTIES.includes(difficulty) && BOARD_SIZES.includes(boardSize);
 }
 
-export function getCategoryStats(difficulty, boardSize, { storage } = {}) {
+export function getCategoryStats(difficulty, boardSize, { storage, userId } = {}) {
     if (!isValidCategory(difficulty, boardSize)) {
         throw new RangeError("Неизвестная категория статистики");
     }
-    return calculateCategoryStats(getSavedMatches({ storage }), difficulty, boardSize);
+    return calculateCategoryStats(getSavedMatches({ storage, userId }), difficulty, boardSize);
 }
 
-export function getOverallStats({ storage } = {}) {
-    const matches = getSavedMatches({ storage });
+export function getOverallStats({ storage, userId } = {}) {
+    const matches = getSavedMatches({ storage, userId });
     const categories = {};
 
     for (const difficulty of DIFFICULTIES) {
