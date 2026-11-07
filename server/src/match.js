@@ -24,6 +24,8 @@ export class Match {
         this.players = { X: null, O: null };
         this.sockets = new Map(); // userId -> WebSocket
         this.disconnectedUser = null;
+        this.disconnectExpiresAt = 0;
+        this.finalResult = null;
         this.startedAt = 0;
         this.movesHistory = [];
         this.d1Saved = false;
@@ -108,11 +110,20 @@ export class Match {
         server.addEventListener("error", () => this.onSocketClose(userId));
 
         // Отправляем текущее состояние партии подключившемуся игроку
+        server.send(JSON.stringify(this.buildSnapshot(userId)));
+        if (this.status === "completed" && this.finalResult) {
+            server.send(JSON.stringify(this.finalResult));
+        }
+
+        return new Response(null, { status: 101, webSocket: client });
+    }
+
+    buildSnapshot(userId) {
         const role = userId === this.players.X?.id ? "X" : "O";
         const opponentRole = role === "X" ? "O" : "X";
         const opponent = this.players[opponentRole];
 
-        server.send(JSON.stringify({
+        const snapshot = {
             type: "match_snapshot",
             matchId: this.matchId,
             role,
@@ -123,9 +134,16 @@ export class Match {
             opponent,
             remainingTurnMs: Math.max(0, this.turnDeadline - Date.now()),
             status: this.status
-        }));
+        };
 
-        return new Response(null, { status: 101, webSocket: client });
+        if (this.status === "paused") {
+            snapshot.disconnectedUser = this.disconnectedUser;
+            snapshot.gracePeriodMs = DEFAULT_GRACE_PERIOD_MS;
+            snapshot.remainingGraceMs = this.disconnectExpiresAt ? Math.max(0, this.disconnectExpiresAt - Date.now()) : DEFAULT_GRACE_PERIOD_MS;
+            snapshot.expiresAt = this.disconnectExpiresAt;
+        }
+
+        return snapshot;
     }
 
     onMessage(userId, event) {
@@ -220,16 +238,19 @@ export class Match {
         if (this.status === "active") {
             this.status = "paused";
             this.disconnectedUser = userId;
+            this.disconnectExpiresAt = Date.now() + DEFAULT_GRACE_PERIOD_MS;
             const remainingUserId = userId === this.players.X?.id ? this.players.O?.id : this.players.X?.id;
 
             this.sendToUser(remainingUserId, {
                 type: "opponent_disconnected",
-                gracePeriodMs: DEFAULT_GRACE_PERIOD_MS
+                gracePeriodMs: DEFAULT_GRACE_PERIOD_MS,
+                remainingGraceMs: DEFAULT_GRACE_PERIOD_MS,
+                expiresAt: this.disconnectExpiresAt
             });
 
             // Взводим Alarm на завершение партии по неявке через grace period
             try {
-                this.ctx.storage.setAlarm(Date.now() + DEFAULT_GRACE_PERIOD_MS);
+                this.ctx.storage.setAlarm(this.disconnectExpiresAt);
             } catch {}
         }
     }
@@ -237,6 +258,7 @@ export class Match {
     handlePlayerReconnected(userId) {
         this.status = "active";
         this.disconnectedUser = null;
+        this.disconnectExpiresAt = 0;
         this.turnDeadline = Date.now() + DEFAULT_TURN_TIMEOUT_MS;
         this.scheduleTurnAlarm();
 
@@ -245,20 +267,10 @@ export class Match {
     }
 
     sendSnapshot(userId) {
-        const role = userId === this.players.X?.id ? "X" : "O";
-        const opponentRole = role === "X" ? "O" : "X";
-        this.sendToUser(userId, {
-            type: "match_snapshot",
-            matchId: this.matchId,
-            role,
-            turn: this.turn,
-            seq: this.seq,
-            board: this.board,
-            boardSize: this.boardSize,
-            opponent: this.players[opponentRole],
-            remainingTurnMs: Math.max(0, this.turnDeadline - Date.now()),
-            status: this.status
-        });
+        this.sendToUser(userId, this.buildSnapshot(userId));
+        if (this.status === "completed" && this.finalResult) {
+            this.sendToUser(userId, this.finalResult);
+        }
     }
 
     async alarm() {
@@ -290,7 +302,7 @@ export class Match {
         const winnerUserId = winner === "X" ? this.players.X?.id : winner === "O" ? this.players.O?.id : null;
         const durationMs = Date.now() - this.startedAt;
 
-        this.broadcast({
+        const endMessage = {
             type: "match_ended",
             matchId: this.matchId,
             winner,
@@ -298,7 +310,10 @@ export class Match {
             winningLine: winningLine || undefined,
             durationMs,
             board: this.board
-        });
+        };
+        this.finalResult = endMessage;
+
+        this.broadcast(endMessage);
 
         // Идемпотентное сохранение в Cloudflare D1
         if (this.env?.DB && this.matchId && !this.d1Saved) {

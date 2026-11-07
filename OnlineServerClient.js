@@ -227,7 +227,8 @@ export class OnlineServerClient extends EventTarget {
                         matchId: msg.matchId,
                         boardSize: msg.boardSize,
                         role: msg.role,
-                        devUser: this.devUser
+                        devUser: this.devUser,
+                        launchParams: this.launchParams
                     }));
                 } catch {}
 
@@ -269,6 +270,11 @@ export class OnlineServerClient extends EventTarget {
 
         socket.onopen = () => {
             this._startHeartbeat();
+            if (this._reconnectTimer) {
+                clearTimeout(this._reconnectTimer);
+                this._reconnectTimer = null;
+            }
+            this._reconnectAttempts = 0;
         };
 
         socket.onmessage = event => {
@@ -281,11 +287,31 @@ export class OnlineServerClient extends EventTarget {
 
         socket.onclose = event => {
             this._stopHeartbeat();
-            if (this.state === "active" || this.state === "connecting") {
+            if (this.state === "active" || this.state === "connecting" || this.state === "paused") {
                 this._setState("paused");
                 this._emit("connection_lost", { matchId });
+
+                if (this.currentMatchId && this.state !== "completed") {
+                    this._scheduleAutoReconnect(matchId);
+                }
             }
         };
+    }
+
+    _scheduleAutoReconnect(matchId) {
+        if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+        this._reconnectAttempts = (this._reconnectAttempts || 0) + 1;
+        if (this._reconnectAttempts > 8) return;
+
+        this._reconnectTimer = setTimeout(async () => {
+            if (this.state === "completed" || !this.currentMatchId) return;
+            try {
+                await this.connectToMatch(matchId);
+                this._reconnectAttempts = 0;
+            } catch {
+                this._scheduleAutoReconnect(matchId);
+            }
+        }, 1500);
     }
 
     _handleMatchMessage(rawData) {
@@ -374,6 +400,9 @@ export class OnlineServerClient extends EventTarget {
             if (savedMatch.devUser) {
                 this.devUser = savedMatch.devUser;
             }
+            if (savedMatch.launchParams) {
+                this.launchParams = savedMatch.launchParams;
+            }
             await this.authenticate();
             await this.connectToMatch(savedMatch.matchId);
             return true;
@@ -411,6 +440,11 @@ export class OnlineServerClient extends EventTarget {
 
     _closeSocket() {
         this._stopHeartbeat();
+        if (this._reconnectTimer) {
+            clearTimeout(this._reconnectTimer);
+            this._reconnectTimer = null;
+        }
+        this._reconnectAttempts = 0;
         if (this._socket) {
             try {
                 this._socket.onopen = null;

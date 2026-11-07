@@ -66,6 +66,10 @@ let searchTimerInterval = null;
 let onlinePracticeClockStarted = false;
 let onlineMatch = null;
 let onlineResultMessage = "";
+let opponentDisconnectTimer = null;
+let opponentDisconnectExpiresAt = null;
+let isOpponentDisconnected = false;
+let reconnectedMessageTimeout = null;
 
 const ONLINE_GAME_PROTOCOL = "tictactoe-game-v1";
 const ONLINE_BOARD_SIZES = new Set([3, 4, 5]);
@@ -439,7 +443,14 @@ function updateInterface() {
     };
 
     if (gameMode === "online") {
-        statusText.textContent = onlineMessages[onlineState] ?? "Поиск игрока";
+        if (reconnectedMessageTimeout) {
+            statusText.textContent = "Соперник вернулся! Игра продолжается.";
+        } else if (isOpponentDisconnected && opponentDisconnectExpiresAt) {
+            const sec = Math.max(0, Math.ceil((opponentDisconnectExpiresAt - Date.now()) / 1000));
+            statusText.textContent = `Соперник отключился. Ожидаем возвращения: ${sec} сек.`;
+        } else {
+            statusText.textContent = onlineMessages[onlineState] ?? "Поиск игрока";
+        }
     } else if (!gameOver) {
         statusText.textContent = gameStarted
             ? currentPlayer === "X" ? "Твой ход" : "Ход компьютера"
@@ -491,7 +502,7 @@ function updateInterface() {
 
     cells.forEach(cell => {
         cell.disabled = gameMode === "online" && !onlinePractice &&
-            !(onlineMatch?.started && onlineState === "ready" && !gameOver &&
+            !(onlineMatch?.started && onlineState === "ready" && !gameOver && !isOpponentDisconnected &&
                 currentPlayer === onlineMatch.localSide);
     });
     updateModeButtons();
@@ -565,7 +576,7 @@ function showMove(index, player) {
 function handleCellClick(event) {
     const index = Number(event.currentTarget.dataset.index);
     const isOnlinePractice = gameMode === "online" && onlineState === "searching";
-    const isOnlineMatch = gameMode === "online" && onlineState === "ready" && onlineMatch?.started;
+    const isOnlineMatch = gameMode === "online" && onlineState === "ready" && onlineMatch?.started && !isOpponentDisconnected;
 
     if (gameOver || (gameMode === "computer" && currentPlayer !== "X") ||
         (gameMode === "online" && !isOnlinePractice && !isOnlineMatch) ||
@@ -762,31 +773,75 @@ function abandonActiveOnlineMatch() {
     return true;
 }
 
-async function startOnlineSearch() {
-    const requestId = ++onlineStartRequestId;
-    onlineStartPending = true;
-    stopSearchTimer();
+function stopDisconnectCountdown() {
+    if (opponentDisconnectTimer) {
+        clearInterval(opponentDisconnectTimer);
+        opponentDisconnectTimer = null;
+    }
+    opponentDisconnectExpiresAt = null;
+}
 
-    if (onlineServerClient) {
-        onlineServerClient.dispose();
-        onlineServerClient = null;
+function handleOpponentDisconnected(data = {}) {
+    if (gameOver) return;
+
+    stopDisconnectCountdown();
+    if (reconnectedMessageTimeout) {
+        clearTimeout(reconnectedMessageTimeout);
+        reconnectedMessageTimeout = null;
     }
 
-    prepareOnlineSearch();
-    gameMode = "online";
-    onlineState = "searching";
-    onlineStartPending = false;
-    onlinePeerId = null;
-    onlineErrorMessage = "";
-    onlineMatch = null;
-    onlineResultMessage = "";
+    isOpponentDisconnected = true;
 
-    const client = new OnlineServerClient();
-    onlineServerClient = client;
+    const graceMs = typeof data.remainingGraceMs === "number"
+        ? data.remainingGraceMs
+        : (typeof data.gracePeriodMs === "number" ? data.gracePeriodMs : 15000);
+
+    opponentDisconnectExpiresAt = data.expiresAt || (Date.now() + graceMs);
+
+    function getRemainingSeconds() {
+        if (!opponentDisconnectExpiresAt) return 0;
+        return Math.max(0, Math.ceil((opponentDisconnectExpiresAt - Date.now()) / 1000));
+    }
+
+    function renderCountdown() {
+        const sec = getRemainingSeconds();
+        statusText.textContent = `Соперник отключился. Ожидаем возвращения: ${sec} сек.`;
+    }
+
+    renderCountdown();
+    updateInterface();
+
+    opponentDisconnectTimer = setInterval(() => {
+        const sec = getRemainingSeconds();
+        renderCountdown();
+    }, 1000);
+}
+
+function handleOpponentReconnected() {
+    if (gameOver) return;
+
+    stopDisconnectCountdown();
+    isOpponentDisconnected = false;
+
+    statusText.textContent = "Соперник вернулся! Игра продолжается.";
+    updateInterface();
+
+    if (reconnectedMessageTimeout) clearTimeout(reconnectedMessageTimeout);
+    reconnectedMessageTimeout = setTimeout(() => {
+        reconnectedMessageTimeout = null;
+        if (!gameOver && onlineMatch?.started) {
+            updateInterface();
+        }
+    }, 2500);
+}
+
+function setupOnlineClientListeners(client, requestId) {
     const isCurrentClient = () => onlineServerClient === client && requestId === onlineStartRequestId;
 
     client.on("searching", () => {
         if (!isCurrentClient()) return;
+        stopDisconnectCountdown();
+        isOpponentDisconnected = false;
         onlineState = "searching";
         startSearchTimer();
         updateInterface();
@@ -795,6 +850,8 @@ async function startOnlineSearch() {
 
     client.on("match_start", data => {
         if (!isCurrentClient()) return;
+        stopDisconnectCountdown();
+        isOpponentDisconnected = false;
         stopSearchTimer();
         onlinePeerId = data.opponent?.name || `Игрок ${data.opponent?.id?.slice(-4) || ""}`;
         onlineState = "connecting";
@@ -812,7 +869,6 @@ async function startOnlineSearch() {
         board = [...snapshot.board];
         renderBoard();
 
-        // Отображаем уже сделанные ходы
         board.forEach((mark, idx) => {
             if (mark) {
                 cells[idx].textContent = mark;
@@ -836,8 +892,19 @@ async function startOnlineSearch() {
 
         resetMatchTimers(snapshot.turn);
         startTimerDisplay();
-        updateInterface();
-        updateTimerDisplay();
+
+        if (snapshot.status === "paused" && snapshot.disconnectedUser && snapshot.disconnectedUser !== client.userId) {
+            handleOpponentDisconnected({
+                gracePeriodMs: snapshot.gracePeriodMs || 15000,
+                remainingGraceMs: snapshot.remainingGraceMs || 15000,
+                expiresAt: snapshot.expiresAt
+            });
+        } else {
+            stopDisconnectCountdown();
+            isOpponentDisconnected = false;
+            updateInterface();
+            updateTimerDisplay();
+        }
     });
 
     client.on("move_applied", data => {
@@ -860,19 +927,28 @@ async function startOnlineSearch() {
 
     client.on("opponent_disconnected", data => {
         if (!isCurrentClient()) return;
-        const sec = Math.round((data.gracePeriodMs || 15000) / 1000);
-        statusText.textContent = `Соперник отключился. Ожидание (${sec} с)…`;
-        updateInterface();
+        handleOpponentDisconnected(data);
     });
 
     client.on("opponent_reconnected", () => {
         if (!isCurrentClient()) return;
-        statusText.textContent = "Соперник вернулся! Игра продолжается.";
-        updateInterface();
+        handleOpponentReconnected();
+    });
+
+    client.on("connection_lost", () => {
+        if (!isCurrentClient() || gameOver) return;
+        statusText.textContent = "Соединение потеряно. Переподключение к матчу…";
     });
 
     client.on("match_ended", data => {
         if (!isCurrentClient()) return;
+        stopDisconnectCountdown();
+        if (reconnectedMessageTimeout) {
+            clearTimeout(reconnectedMessageTimeout);
+            reconnectedMessageTimeout = null;
+        }
+        isOpponentDisconnected = false;
+
         timerState.finish();
         gameOver = true;
         stopTimerDisplay();
@@ -897,19 +973,19 @@ async function startOnlineSearch() {
             message = "Ничья!";
             outcome = "draw";
         } else if (data.winner === onlineMatch?.localSide) {
-            if (data.reason === "timeout") {
+            if (data.reason === "abandoned" || data.reason === "disconnect_timeout") {
+                message = "Время ожидания истекло. Вы победили! Соперник не вернулся.";
+            } else if (data.reason === "timeout") {
                 message = "Ты победил! (Соперник превысил время)";
-            } else if (data.reason === "abandoned") {
-                message = "Ты победил! (Соперник покинул игру)";
             } else {
                 message = "Ты победил!";
             }
             outcome = "win";
         } else {
-            if (data.reason === "timeout") {
+            if (data.reason === "abandoned" || data.reason === "disconnect_timeout") {
+                message = "Время ожидания истекло. Поражение: время на возвращение истекло.";
+            } else if (data.reason === "timeout") {
                 message = "Поражение: время на ход истекло";
-            } else if (data.reason === "abandoned") {
-                message = "Поражение: партия покинута";
             } else {
                 message = "Победил соперник!";
             }
@@ -940,6 +1016,38 @@ async function startOnlineSearch() {
     client.on("search_canceled", () => {
         if (isCurrentClient()) switchToComputer("Поиск отменён");
     });
+}
+
+async function startOnlineSearch() {
+    const requestId = ++onlineStartRequestId;
+    onlineStartPending = true;
+    stopSearchTimer();
+    stopDisconnectCountdown();
+    if (reconnectedMessageTimeout) {
+        clearTimeout(reconnectedMessageTimeout);
+        reconnectedMessageTimeout = null;
+    }
+    isOpponentDisconnected = false;
+
+    if (onlineServerClient) {
+        onlineServerClient.dispose();
+        onlineServerClient = null;
+    }
+
+    prepareOnlineSearch();
+    gameMode = "online";
+    onlineState = "searching";
+    onlineStartPending = false;
+    onlinePeerId = null;
+    onlineErrorMessage = "";
+    onlineMatch = null;
+    onlineResultMessage = "";
+
+    const client = new OnlineServerClient();
+    onlineServerClient = client;
+    const isCurrentClient = () => onlineServerClient === client && requestId === onlineStartRequestId;
+
+    setupOnlineClientListeners(client, requestId);
 
     try {
         const profile = {
@@ -958,6 +1066,12 @@ function switchToComputer(notice = "") {
     onlineStartRequestId += 1;
     onlineStartPending = false;
     stopSearchTimer();
+    stopDisconnectCountdown();
+    if (reconnectedMessageTimeout) {
+        clearTimeout(reconnectedMessageTimeout);
+        reconnectedMessageTimeout = null;
+    }
+    isOpponentDisconnected = false;
 
     if (onlineServerClient) {
         if (onlineState === "searching") {
@@ -1540,18 +1654,31 @@ function renderDevModeBadge() {
 (async function initClientEnvironment() {
     renderDevModeBadge();
 
-    const tempClient = new OnlineServerClient();
+    const client = new OnlineServerClient();
+    const requestId = ++onlineStartRequestId;
+    onlineServerClient = client;
+    setupOnlineClientListeners(client, requestId);
+
     try {
-        const restored = await tempClient.checkAndRestoreSession();
+        const restored = await client.checkAndRestoreSession();
         if (restored) {
             console.log("Восстановлена активная онлайн-сессия после перезагрузки страницы");
-            onlineServerClient = tempClient;
             gameMode = "online";
             onlineState = "connecting";
             updateModeButtons();
             updateInterface();
+        } else {
+            if (onlineServerClient === client) {
+                onlineServerClient = null;
+            }
+            client.dispose();
         }
-    } catch {}
+    } catch {
+        if (onlineServerClient === client) {
+            onlineServerClient = null;
+        }
+        client.dispose();
+    }
 })();
 
 updateInterface();
