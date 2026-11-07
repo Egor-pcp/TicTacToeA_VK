@@ -38,7 +38,7 @@ TicTacToeA_VK/
 ├── server/                     # Бэкенд онлайн-мультиплеера (Workers, D1, DO)
 │   ├── src/                    # worker.js, matchmaker.js, match.js, game-rules.js, vk-auth.js, token.js
 │   ├── migrations/             # Схемы баз данных Cloudflare D1
-│   ├── test/                   # Автоматические тесты бэкенда и сетевого клиента (45 тестов)
+│   ├── test/                   # Автоматические тесты бэкенда и сетевого клиента (54 теста)
 │   └── wrangler.jsonc          # Конфигурация Cloudflare Workers
 ├── webrtc-prototype/           # Экспериментальный сетевой прототип (сохранён как эталон)
 ├── AGENTS.md                   # Постоянный регламент и правила для ИИ-агентов
