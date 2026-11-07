@@ -27,10 +27,12 @@ TicTacToeA_VK/
 ├── game-logic.js               # Игровая логика, правила победы и ИИ
 ├── player-stats.js             # Локальный профиль и статистика (localStorage)
 ├── my avatar.JPG               # Иллюстрация для вкладки «О проекте»
-├── webrtc-prototype/           # Экспериментальный сетевой прототип
-│   ├── src/worker.js           # Cloudflare Worker + Durable Object (матчмейкер)
-│   ├── public/                 # Тестовый веб-клиент и WebRTC-модуль
+├── server/                     # Бэкенд онлайн-мультиплеера (Workers, D1, DO)
+│   ├── src/                    # Точка входа worker.js, vk-auth.js, token.js
+│   ├── migrations/             # Схемы баз данных Cloudflare D1
+│   ├── test/                   # Автоматические тесты бэкенда
 │   └── wrangler.jsonc          # Конфигурация Cloudflare Workers
+├── webrtc-prototype/           # Экспериментальный сетевой прототип (сохранён как эталон)
 ├── AGENTS.md                   # Постоянный регламент и правила для ИИ-агентов
 ├── TASKS_AI.md                 # Главная карточка проекта: состояние, задачи, решения
 ├── ARCHITECTURE.md             # Фактическая архитектура игры и сетевых слоев

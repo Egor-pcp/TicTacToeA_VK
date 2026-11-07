@@ -1,0 +1,17 @@
+# Пример локальных переменных окружения для Cloudflare Workers (Wrangler)
+# Скопируйте этот файл в .dev.vars для локального запуска
+
+# Режим разработки (true активирует тестовую авторизацию dev_user_1 и dev_user_2)
+DEV_MODE=true
+
+# ID приложения ВКонтакте (получается в кабинете VK Developers)
+VK_APP_ID=51234567
+
+# Защищённый ключ приложения (Client Secret из настроек VK Mini Apps)
+VK_CLIENT_SECRET=your_vk_client_secret_here
+
+# Секретный ключ для подписи игровых токенов сессии
+GAME_TOKEN_SECRET=dev_local_token_secret_99999
+
+# Максимальный возраст параметров запуска в секундах (86400 = 24 часа)
+PARAM_MAX_AGE_SECONDS=86400

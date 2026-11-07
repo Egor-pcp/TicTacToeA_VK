@@ -26,9 +26,10 @@ function bufferToBase64Url(buffer) {
  *
  * @param {string | URLSearchParams | Record<string, string>} rawParams - Query-строка или объект параметров.
  * @param {string} clientSecret - Защищённый ключ приложения (Client Secret).
+ * @param {{ maxAgeSeconds?: number, expectedAppId?: string }} [options={}] - Дополнительные проверки (срок актуальности, App ID).
  * @returns {Promise<{ isValid: boolean, userId: string | null, params: Record<string, string>, reason?: string }>}
  */
-export async function verifyVkLaunchParams(rawParams, clientSecret) {
+export async function verifyVkLaunchParams(rawParams, clientSecret, options = {}) {
     if (!clientSecret || typeof clientSecret !== "string") {
         return { isValid: false, userId: null, params: {}, reason: "Client secret is missing or invalid" };
     }
@@ -97,6 +98,20 @@ export async function verifyVkLaunchParams(rawParams, clientSecret) {
 
     if (!isValid) {
         return { isValid: false, userId: null, params: collectedParams, reason: "Signature mismatch" };
+    }
+
+    // 7. Проверка App ID (если задано)
+    if (options.expectedAppId && collectedParams.vk_app_id !== options.expectedAppId) {
+        return { isValid: false, userId: null, params: collectedParams, reason: "App ID mismatch" };
+    }
+
+    // 8. Проверка срока актуальности (если передан vk_ts)
+    if (collectedParams.vk_ts && options.maxAgeSeconds) {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const paramTs = Number(collectedParams.vk_ts);
+        if (Number.isFinite(paramTs) && nowSec - paramTs > options.maxAgeSeconds) {
+            return { isValid: false, userId: null, params: collectedParams, reason: "Launch parameters expired" };
+        }
     }
 
     return {

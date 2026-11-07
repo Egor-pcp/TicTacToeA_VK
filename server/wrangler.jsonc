@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tictactoe-vk-server",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-30",
+  "workers_dev": true,
+  "vars": {
+    "DEV_MODE": "true"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MATCHMAKER",
+        "class_name": "Matchmaker"
+      },
+      {
+        "name": "MATCH",
+        "class_name": "Match"
+      }
+    ]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tictactoe-d1",
+      "database_id": "local-tictactoe-d1"
+    }
+  ],
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["Matchmaker", "Match"]
+    }
+  ]
+}

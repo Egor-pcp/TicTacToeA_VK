@@ -1,0 +1,12 @@
+{
+  "name": "tictactoe-vk-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Workers backend for TicTacToeA_VK",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "dev": "wrangler dev",
+    "d1:init": "wrangler d1 execute tictactoe-d1 --local --file=./migrations/0001_initial.sql"
+  }
+}
