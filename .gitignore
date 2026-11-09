@@ -45,3 +45,7 @@ credentials.json
 /backup-lesson-6/
 *.bak
 *.backup
+
+# Reference etalon files (VK-005-001)
+etalon/
+

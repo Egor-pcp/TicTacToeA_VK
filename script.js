@@ -1843,9 +1843,12 @@ function renderDevModeBadge() {
         badge = document.createElement("div");
         badge.id = "dev-mode-badge";
         badge.className = "dev-badge";
-        const heading = document.querySelector(".tab-heading");
-        if (heading && heading.parentNode) {
-            heading.parentNode.insertBefore(badge, heading.nextSibling);
+        const footer = document.querySelector(".game-footer");
+        if (footer && footer.parentNode) {
+            footer.parentNode.insertBefore(badge, footer.nextSibling);
+        } else {
+            const gameView = document.querySelector("#game-view");
+            if (gameView) gameView.appendChild(badge);
         }
     }
 
