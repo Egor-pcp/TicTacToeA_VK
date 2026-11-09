@@ -16,10 +16,11 @@ export class OnlineServerClient extends EventTarget {
     constructor(config = {}) {
         super();
 
+        this.platformAdapter = config.platformAdapter || null;
         this.serverUrl = config.serverUrl || this._detectServerUrl();
         this.wsUrl = config.wsUrl || this._deriveWsUrl(this.serverUrl);
-        this.devUser = config.devUser || this._detectDevUser();
-        this.launchParams = config.launchParams || this._detectLaunchParams();
+        this.devUser = config.devUser || (this.platformAdapter?.mode === "development" ? this.platformAdapter.getUserId() : this._detectDevUser());
+        this.launchParams = config.launchParams || (this.platformAdapter?.mode === "vk_mini_apps" ? this.platformAdapter.getLaunchParams() : this._detectLaunchParams());
 
         this.token = null;
         this.userId = null;

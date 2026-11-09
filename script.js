@@ -14,8 +14,22 @@ import {
     getOrCreatePlayerIdentity
 } from "./player-stats.js";
 import { OnlineServerClient } from "./OnlineServerClient.js";
+import { createPlatformAdapter, isVkMiniAppsMode } from "./platform-adapter.js";
+
+let platformAdapter = null;
+let lastAdShownAt = 0;
+const AD_COOLDOWN_MS = 60000;
 
 function getActiveUserId() {
+    if (platformAdapter) {
+        if (platformAdapter.mode === "vk_mini_apps") {
+            const vkId = platformAdapter.getUserId();
+            if (vkId) return vkId.startsWith("vk_") ? vkId : `vk_${vkId}`;
+        }
+        if (platformAdapter.mode === "development") {
+            return platformAdapter.getUserId() || "dev_user_1";
+        }
+    }
     if (typeof window === "undefined") return "dev_user_1";
     const params = new URLSearchParams(window.location.search);
     const vkUserId = params.get("vk_user_id");
@@ -23,11 +37,26 @@ function getActiveUserId() {
     return params.get("dev_user") || sessionStorage.getItem("tictactoe_dev_user") || "dev_user_1";
 }
 
+async function maybeShowInterstitialAd() {
+    if (!platformAdapter) return;
+    const now = Date.now();
+    if (now - lastAdShownAt < AD_COOLDOWN_MS) {
+        return;
+    }
+    lastAdShownAt = now;
+    try {
+        await platformAdapter.showNativeAds({ ad_format: "interstitial" });
+    } catch (err) {
+        console.warn("Native ad notice:", err?.message || err);
+    }
+}
+
 window.addEventListener("tictactoe:match-completed", event => {
     const currentUserId = getActiveUserId();
     addCompletedMatch(event.detail, { userId: currentUserId });
     leaderboardDirty = true;
     renderStats();
+    maybeShowInterstitialAd();
 });
 
 // Элементы интерфейса
@@ -1213,16 +1242,23 @@ async function startOnlineSearch() {
     onlineMatch = null;
     onlineResultMessage = "";
 
-    const client = new OnlineServerClient();
+    const client = new OnlineServerClient({ platformAdapter });
     onlineServerClient = client;
     const isCurrentClient = () => onlineServerClient === client && requestId === onlineStartRequestId;
 
     setupOnlineClientListeners(client, requestId);
 
     try {
-        const profile = {
-            name: client.devUser === "dev_user_2" ? "Игрок 2" : "Игрок 1"
-        };
+        let profileName = client.devUser === "dev_user_2" ? "Игрок 2" : "Игрок 1";
+        if (platformAdapter) {
+            try {
+                const info = await platformAdapter.getUserInfo();
+                if (info?.first_name) {
+                    profileName = info.last_name ? `${info.first_name} ${info.last_name}` : info.first_name;
+                }
+            } catch {}
+        }
+        const profile = { name: profileName };
         await client.startSearch(selectedBoardSize, profile);
     } catch (error) {
         if (isCurrentClient()) handleOnlineError(error.message);
@@ -1789,12 +1825,11 @@ function renderDevModeBadge() {
     if (typeof window === "undefined" || !document.body) return;
 
     // Не отображаем в боевой среде VK Mini Apps
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("vk_user_id") || params.get("vk_app_id")) {
+    if (platformAdapter?.mode === "vk_mini_apps" || isVkMiniAppsMode()) {
         return;
     }
 
-    const currentDevUser = params.get("dev_user") || sessionStorage.getItem("tictactoe_dev_user") || "dev_user_1";
+    const currentDevUser = platformAdapter?.getUserId() || (new URLSearchParams(window.location.search)).get("dev_user") || sessionStorage.getItem("tictactoe_dev_user") || "dev_user_1";
     const nextDevUser = currentDevUser === "dev_user_1" ? "dev_user_2" : "dev_user_1";
 
     let badge = document.querySelector("#dev-mode-badge");
@@ -1814,6 +1849,9 @@ function renderDevModeBadge() {
     `;
 
     document.querySelector("#switch-dev-user-btn")?.addEventListener("click", () => {
+        try {
+            platformAdapter?.setDevUser(nextDevUser);
+        } catch {}
         sessionStorage.setItem("tictactoe_dev_user", nextDevUser);
         const newUrl = new URL(window.location.href);
         newUrl.searchParams.set("dev_user", nextDevUser);
@@ -1821,11 +1859,42 @@ function renderDevModeBadge() {
     });
 }
 
-// Инициализация при загрузке: отображение Dev-бейджа и проверка Reconnect
-(async function initClientEnvironment() {
-    renderDevModeBadge();
+function initCommunityLink() {
+    const communityBtn = document.querySelector(".about-channel-button");
+    if (!communityBtn) return;
 
-    const client = new OnlineServerClient();
+    if (platformAdapter?.mode === "vk_mini_apps") {
+        communityBtn.textContent = "Сообщество PCP Games";
+        communityBtn.removeAttribute("target");
+        communityBtn.addEventListener("click", async event => {
+            event.preventDefault();
+            const groupId = window.TICTACTOE_ONLINE_CONFIG?.vkGroupId;
+            if (groupId) {
+                try {
+                    await platformAdapter.joinGroup({ group_id: groupId });
+                } catch (err) {
+                    console.warn("PCP Games group join notice:", err);
+                }
+            } else {
+                console.warn("PCP Games VK group ID is not configured yet (Block 2 requirement)");
+            }
+        });
+    }
+}
+
+// Инициализация при загрузке: платформа, отображение Dev-бейджа и проверка Reconnect
+(async function initClientEnvironment() {
+    platformAdapter = createPlatformAdapter();
+    try {
+        await platformAdapter.init();
+    } catch (err) {
+        console.warn("Platform adapter init notice:", err?.message || err);
+    }
+
+    renderDevModeBadge();
+    initCommunityLink();
+
+    const client = new OnlineServerClient({ platformAdapter });
     const requestId = ++onlineStartRequestId;
     onlineServerClient = client;
     setupOnlineClientListeners(client, requestId);
