@@ -67,6 +67,16 @@ export class OnlineServerClient extends EventTarget {
 
     _detectDevUser() {
         if (typeof window !== "undefined") {
+            const hostname = window.location?.hostname || "";
+            const isLocal = hostname === "" ||
+                hostname === "localhost" ||
+                hostname === "127.0.0.1" ||
+                hostname === "::1" ||
+                hostname === "[::1]" ||
+                hostname === "0.0.0.0";
+            if (!isLocal) {
+                return null;
+            }
             const params = new URLSearchParams(window.location.search);
             const devFromUrl = params.get("dev_user");
             if (devFromUrl) return devFromUrl;

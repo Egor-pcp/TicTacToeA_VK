@@ -17,6 +17,7 @@ import { OnlineServerClient } from "./OnlineServerClient.js";
 import {
     createPlatformAdapter,
     isVkMiniAppsMode,
+    isDevelopmentEnvironment,
     AdCooldownManager
 } from "./platform-adapter.js";
 
@@ -30,12 +31,18 @@ function getActiveUserId() {
         if (platformAdapter.mode === "vk_mini_apps") {
             const vkId = platformAdapter.getUserId();
             if (vkId) return vkId.startsWith("vk_") ? vkId : `vk_${vkId}`;
+            return null;
         }
         if (platformAdapter.mode === "development") {
             return platformAdapter.getUserId() || "dev_user_1";
         }
     }
     if (typeof window === "undefined") return "dev_user_1";
+    if (!isDevelopmentEnvironment()) {
+        const params = new URLSearchParams(window.location.search);
+        const vkUserId = params.get("vk_user_id");
+        return vkUserId ? (vkUserId.startsWith("vk_") ? vkUserId : `vk_${vkUserId}`) : null;
+    }
     const params = new URLSearchParams(window.location.search);
     const vkUserId = params.get("vk_user_id");
     if (vkUserId) return `vk_${vkUserId}`;
@@ -1821,8 +1828,10 @@ window.runTimerTests = runTimerTests;
 function renderDevModeBadge() {
     if (typeof window === "undefined" || !document.body) return;
 
-    // Не отображаем в боевой среде VK Mini Apps
-    if (platformAdapter?.mode === "vk_mini_apps" || isVkMiniAppsMode()) {
+    // Не отображаем в боевой среде VK Mini Apps или вне доверенного Development Mode
+    if (platformAdapter?.mode !== "development" || !isDevelopmentEnvironment()) {
+        const badge = document.querySelector("#dev-mode-badge");
+        if (badge) badge.remove();
         return;
     }
 

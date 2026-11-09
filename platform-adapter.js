@@ -60,7 +60,7 @@ export class PlatformAdapter {
 export class MockPlatformAdapter extends PlatformAdapter {
     constructor(config = {}) {
         super();
-        this.currentDevUser = config.devUser || this._detectDevUser();
+        this.currentDevUser = config.devUser || this._detectDevUser(config.searchUrl);
         this.adsCallCount = 0;
         this.lastAdFormat = null;
         this.groupJoinCalls = [];
@@ -77,14 +77,27 @@ export class MockPlatformAdapter extends PlatformAdapter {
         return "development";
     }
 
-    _detectDevUser() {
+    _detectDevUser(searchUrl = null) {
+        let search = searchUrl;
+        if (search === null && typeof window !== "undefined") {
+            search = window.location.search;
+        }
+        if (search) {
+            try {
+                const clean = search.startsWith("?") ? search.slice(1) : search;
+                const params = new URLSearchParams(clean);
+                const fromUrl = params.get("dev_user");
+                if (fromUrl === "dev_user_1" || fromUrl === "dev_user_2") {
+                    return fromUrl;
+                }
+            } catch {}
+        }
         if (typeof window !== "undefined") {
-            const params = new URLSearchParams(window.location.search);
-            const fromUrl = params.get("dev_user");
-            if (fromUrl) return fromUrl;
             try {
                 const fromSession = sessionStorage.getItem("tictactoe_dev_user");
-                if (fromSession) return fromSession;
+                if (fromSession === "dev_user_1" || fromSession === "dev_user_2") {
+                    return fromSession;
+                }
             } catch {}
         }
         return "dev_user_1";
@@ -277,42 +290,70 @@ export function isVkMiniAppsMode(searchUrl = null, bridge = null) {
 }
 
 /**
- * Проверка, запущено ли приложение в окружении разработки (Development Mode).
- * 
- * Окружение считается Development Mode, если:
- * 1. Явно указано config.forceMode === "development"
- * 2. URL содержит параметр dev_user или mode=dev
- * 3. Хост браузера localhost, 127.0.0.1 или пустой (локальный файл/Node.js) при отсутствии VK параметров
+ * Проверка, является ли переданный hostname доверенным локальным адресом.
  */
-export function isDevelopmentEnvironment(config = {}) {
-    if (config.forceMode === "development") return true;
-    if (config.forceMode === "vk_mini_apps") return false;
-
-    const search = config.searchUrl !== undefined
-        ? config.searchUrl
-        : (typeof window !== "undefined" ? window.location.search : "");
-
-    if (search) {
-        try {
-            const cleanSearch = search.startsWith("?") ? search.slice(1) : search;
-            const params = new URLSearchParams(cleanSearch);
-            if (params.has("dev_user") || params.get("mode") === "dev") {
-                return true;
-            }
-        } catch {}
+export function isLocalHostname(hostname) {
+    if (typeof hostname !== "string") {
+        return false;
     }
+    const cleanHost = hostname.trim().toLowerCase();
+    return cleanHost === "" ||
+           cleanHost === "localhost" ||
+           cleanHost === "127.0.0.1" ||
+           cleanHost === "::1" ||
+           cleanHost === "[::1]" ||
+           cleanHost === "0.0.0.0";
+}
 
-    if (typeof window !== "undefined") {
-        const hostname = window.location?.hostname || "";
-        if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "") {
-            return true;
-        }
+/**
+ * Определение, запущено ли приложение в доверенном локальном окружении разработки.
+ * 
+ * Доверенным локальным окружением считаются ТОЛЬКО:
+ * 1. Браузер с доверенным локальным hostname (localhost, 127.0.0.1, ::1, 0.0.0.0 или "" для file://).
+ * 2. Тестовая среда Node.js (window === undefined), если явно не указан боевой hostname или флаг production.
+ * 
+ * Внешние production-домены НИ ПРИ КАКИХ УСЛОВИЯХ не могут считаться доверенным локальным окружением:
+ * никакие параметры URL (?dev_user=..., ?mode=dev) и попытки forceMode: "development"
+ * не способны переопределить боевой статус хоста.
+ */
+export function isTrustedLocalEnvironment(config = {}) {
+    if (config.isProduction || config.production) {
         return false;
     }
 
-    // Для Node.js (тесты/скрипты)
-    if (config.devUser) return true;
-    if (config.isProduction || config.production) return false;
+    if (config.hostname !== undefined) {
+        return isLocalHostname(config.hostname);
+    }
+
+    if (typeof window !== "undefined") {
+        const hostname = window.location?.hostname ?? "";
+        return isLocalHostname(hostname);
+    }
+
+    // Для среды Node.js (тесты): локально по умолчанию, если не задан production
+    return true;
+}
+
+/**
+ * Проверка, запущено ли приложение в окружении разработки (Development Mode).
+ * 
+ * Архитектурный принцип защиты Production (VK-003-007.2):
+ * - Development Mode может быть активен ИСКЛЮЧИТЕЛЬНО в доверенном локальном окружении (localhost / 127.0.0.1).
+ * - На боевых production-доменах функция ВСЕГДА возвращает false, независимо от параметров URL.
+ * - Внутри доверенного локального окружения параметры dev_user / mode=dev могут использоваться
+ *   для выбора тестового профиля или конфигурации.
+ */
+export function isDevelopmentEnvironment(config = {}) {
+    // Если окружение не является доверенным локальным — режим разработки категорически недоступен
+    if (!isTrustedLocalEnvironment(config)) {
+        return false;
+    }
+
+    // В локальном окружении: если явно запрошен боевой режим VK для тестирования
+    if (config.forceMode === "vk_mini_apps") {
+        return false;
+    }
+
     return true;
 }
 
@@ -320,37 +361,44 @@ export function isDevelopmentEnvironment(config = {}) {
  * Фабрика платформенного адаптера.
  * Автоматически выбирает VkBridgeAdapter или MockPlatformAdapter.
  * 
- * Правила выбора:
- * 1. config.forceMode === "vk_mini_apps" -> VkBridgeAdapter
- * 2. config.forceMode === "development" -> MockPlatformAdapter
- * 3. Обнаружены признаки VK Mini Apps (параметры vk_* или window.vkBridge) -> VkBridgeAdapter
- * 4. Обнаружено окружение разработки (localhost, 127.0.0.1, dev_user) -> MockPlatformAdapter
- * 5. По умолчанию в продакшене (боевой хост без параметров VK) -> VkBridgeAdapter (защита от утечки моков)
+ * Архитектурные правила защиты Production (VK-003-007.2):
+ * 1. На production-хостах (не локальных) создание MockPlatformAdapter СТРОГО ЗАПРЕЩЕНО.
+ *    Любые попытки передачи forceMode: "development", параметров ?dev_user или ?mode=dev
+ *    на production-хостах блокируются, возвращается VkBridgeAdapter.
+ * 2. При явном forceMode === "vk_mini_apps" (как в prod, так и на localhost) -> VkBridgeAdapter.
+ * 3. В доверенном локальном окружении при наличии параметров запуска VK или bridge
+ *    создаётся VkBridgeAdapter (легитимный способ локального тестирования VK-режима).
+ * 4. В доверенном локальном окружении по умолчанию -> MockPlatformAdapter.
  */
 export function createPlatformAdapter(config = {}) {
+    const isLocal = isTrustedLocalEnvironment(config);
+
+    // 1. Явный запрос режима VK Mini Apps (работает везде, в т.ч. локально для тестов)
     if (config.forceMode === "vk_mini_apps") {
         return new VkBridgeAdapter(config);
-    }
-    if (config.forceMode === "development") {
-        return new MockPlatformAdapter(config);
     }
 
     const search = config.searchUrl !== undefined
         ? config.searchUrl
         : (typeof window !== "undefined" ? window.location.search : "");
-
     const bridge = config.bridge !== undefined ? config.bridge : null;
 
+    // 2. ЗАЩИТА PRODUCTION:
+    // На любом не-локальном хосте MockPlatformAdapter категорически запрещён.
+    // Попытки forceMode: "development", ?dev_user или ?mode=dev игнорируются,
+    // возвращается VkBridgeAdapter.
+    if (!isLocal) {
+        return new VkBridgeAdapter({ ...config, searchUrl: search });
+    }
+
+    // 3. Доверенное локальное окружение: легитимное тестирование VK-режима
+    // (если переданы параметры запуска VK или bridge)
     if (isVkMiniAppsMode(search, bridge)) {
         return new VkBridgeAdapter({ ...config, searchUrl: search });
     }
 
-    if (isDevelopmentEnvironment(config)) {
-        return new MockPlatformAdapter(config);
-    }
-
-    // Защита продакшена: предотвращаем неконтролируемый fallback на MockPlatformAdapter
-    return new VkBridgeAdapter({ ...config, searchUrl: search });
+    // 4. Доверенное локальное окружение: MockPlatformAdapter
+    return new MockPlatformAdapter(config);
 }
 
 /**

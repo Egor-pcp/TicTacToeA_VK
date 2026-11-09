@@ -8,6 +8,8 @@ import {
     createPlatformAdapter,
     isVkMiniAppsMode,
     isDevelopmentEnvironment,
+    isLocalHostname,
+    isTrustedLocalEnvironment,
     AdCooldownManager
 } from "../../platform-adapter.js";
 import { OnlineServerClient } from "../../OnlineServerClient.js";
@@ -346,5 +348,117 @@ describe("VK-003-007: Платформенная интеграция (MockPlatf
         await assert.rejects(async () => {
             await client.authenticate();
         }, /Missing authentication credentials/);
+    });
+});
+
+describe("VK-003-007.2: Защита Production от принудительного включения Development Mode", () => {
+    // Искусственный production-хост для тестирования защиты боевого окружения
+    const PROD_HOST = "tictactoe-vk.pages.dev";
+
+    test("1. localhost без параметров — Mock", () => {
+        const adapter = createPlatformAdapter({ hostname: "localhost", searchUrl: "" });
+        assert.equal(adapter instanceof MockPlatformAdapter, true);
+        assert.equal(adapter.isMock, true);
+        assert.equal(adapter.mode, "development");
+        assert.equal(adapter.getUserId(), "dev_user_1");
+    });
+
+    test("2. localhost?dev_user=dev_user_1 — Mock", () => {
+        const adapter = createPlatformAdapter({ hostname: "localhost", searchUrl: "?dev_user=dev_user_1" });
+        assert.equal(adapter instanceof MockPlatformAdapter, true);
+        assert.equal(adapter.isMock, true);
+        assert.equal(adapter.mode, "development");
+        assert.equal(adapter.getUserId(), "dev_user_1");
+    });
+
+    test("3. localhost?dev_user=dev_user_2 — Mock", () => {
+        const adapter = createPlatformAdapter({ hostname: "localhost", searchUrl: "?dev_user=dev_user_2" });
+        assert.equal(adapter instanceof MockPlatformAdapter, true);
+        assert.equal(adapter.isMock, true);
+        assert.equal(adapter.mode, "development");
+        assert.equal(adapter.getUserId(), "dev_user_2");
+    });
+
+    test("4. Production без параметров и без VK Bridge — VK-адаптер, не Mock", async () => {
+        const adapter = createPlatformAdapter({ hostname: PROD_HOST, searchUrl: "" });
+        assert.equal(adapter instanceof VkBridgeAdapter, true);
+        assert.equal(adapter.isMock, false);
+        assert.equal(adapter.mode, "vk_mini_apps");
+        assert.equal(adapter.getLaunchParams(), null);
+        assert.equal(adapter.getUserId(), null);
+
+        // При отсутствии bridge в production вызов init() выбрасывает ошибку
+        await assert.rejects(async () => {
+            await adapter.init();
+        }, /VK Bridge is not available in the current environment/);
+    });
+
+    test("5. Production с ?mode=dev — не Mock", () => {
+        const adapter = createPlatformAdapter({ hostname: PROD_HOST, searchUrl: "?mode=dev" });
+        assert.equal(adapter instanceof VkBridgeAdapter, true);
+        assert.equal(adapter.isMock, false);
+        assert.equal(adapter.mode, "vk_mini_apps");
+        assert.equal(isDevelopmentEnvironment({ hostname: PROD_HOST, searchUrl: "?mode=dev" }), false);
+    });
+
+    test("6. Production с ?dev_user=dev_user_1 — не Mock", () => {
+        const adapter = createPlatformAdapter({ hostname: PROD_HOST, searchUrl: "?dev_user=dev_user_1" });
+        assert.equal(adapter instanceof VkBridgeAdapter, true);
+        assert.equal(adapter.isMock, false);
+        assert.equal(adapter.mode, "vk_mini_apps");
+        assert.equal(isDevelopmentEnvironment({ hostname: PROD_HOST, searchUrl: "?dev_user=dev_user_1" }), false);
+    });
+
+    test("7. Production с ?dev_user=dev_user_2 — не Mock", () => {
+        const adapter = createPlatformAdapter({ hostname: PROD_HOST, searchUrl: "?dev_user=dev_user_2" });
+        assert.equal(adapter instanceof VkBridgeAdapter, true);
+        assert.equal(adapter.isMock, false);
+        assert.equal(adapter.mode, "vk_mini_apps");
+        assert.equal(isDevelopmentEnvironment({ hostname: PROD_HOST, searchUrl: "?dev_user=dev_user_2" }), false);
+    });
+
+    test("8. Production с попыткой forceMode: 'development' — не Mock", () => {
+        const adapter = createPlatformAdapter({
+            hostname: PROD_HOST,
+            forceMode: "development",
+            searchUrl: "?mode=dev&dev_user=dev_user_1"
+        });
+        assert.equal(adapter instanceof VkBridgeAdapter, true);
+        assert.equal(adapter.isMock, false);
+        assert.equal(adapter.mode, "vk_mini_apps");
+        assert.equal(isDevelopmentEnvironment({
+            hostname: PROD_HOST,
+            forceMode: "development",
+            searchUrl: "?mode=dev"
+        }), false);
+    });
+
+    test("9. Явный forceMode: 'vk_mini_apps' — VK-адаптер", () => {
+        const adapterOnLocal = createPlatformAdapter({ hostname: "localhost", forceMode: "vk_mini_apps" });
+        assert.equal(adapterOnLocal instanceof VkBridgeAdapter, true);
+        assert.equal(adapterOnLocal.isMock, false);
+        assert.equal(adapterOnLocal.mode, "vk_mini_apps");
+
+        const adapterOnProd = createPlatformAdapter({ hostname: PROD_HOST, forceMode: "vk_mini_apps" });
+        assert.equal(adapterOnProd instanceof VkBridgeAdapter, true);
+        assert.equal(adapterOnProd.isMock, false);
+        assert.equal(adapterOnProd.mode, "vk_mini_apps");
+    });
+
+    test("10. Существующие тесты Development Mode продолжают проходить", () => {
+        // Проверка доверенных локальных адресов
+        assert.equal(isLocalHostname("localhost"), true);
+        assert.equal(isLocalHostname("127.0.0.1"), true);
+        assert.equal(isLocalHostname("::1"), true);
+        assert.equal(isLocalHostname("[::1]"), true);
+        assert.equal(isLocalHostname("0.0.0.0"), true);
+        assert.equal(isLocalHostname(""), true);
+        assert.equal(isLocalHostname(PROD_HOST), false);
+        assert.equal(isLocalHostname("vk.com"), false);
+
+        assert.equal(isTrustedLocalEnvironment({ hostname: "localhost" }), true);
+        assert.equal(isTrustedLocalEnvironment({ hostname: "127.0.0.1" }), true);
+        assert.equal(isTrustedLocalEnvironment({ hostname: PROD_HOST }), false);
+        assert.equal(isTrustedLocalEnvironment({ isProduction: true }), false);
     });
 });
