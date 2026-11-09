@@ -19,7 +19,7 @@ export class OnlineServerClient extends EventTarget {
         this.platformAdapter = config.platformAdapter || null;
         this.serverUrl = config.serverUrl || this._detectServerUrl();
         this.wsUrl = config.wsUrl || this._deriveWsUrl(this.serverUrl);
-        this.devUser = config.devUser || (this.platformAdapter?.mode === "development" ? this.platformAdapter.getUserId() : this._detectDevUser());
+        this.devUser = config.devUser || (this.platformAdapter ? (this.platformAdapter.mode === "development" ? this.platformAdapter.getUserId() : null) : this._detectDevUser());
         this.launchParams = config.launchParams || (this.platformAdapter?.mode === "vk_mini_apps" ? this.platformAdapter.getLaunchParams() : this._detectLaunchParams());
 
         this.token = null;
@@ -116,8 +116,10 @@ export class OnlineServerClient extends EventTarget {
             Object.assign(authPayload, overrideData);
         } else if (this.launchParams) {
             authPayload.launchParams = this.launchParams;
+        } else if (this.devUser) {
+            authPayload.devUser = this.devUser;
         } else {
-            authPayload.devUser = this.devUser || "dev_user_1";
+            throw new Error("Missing authentication credentials: no launch parameters or dev user available");
         }
 
         try {

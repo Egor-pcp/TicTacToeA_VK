@@ -133,6 +133,9 @@ export class MockPlatformAdapter extends PlatformAdapter {
         if (this.adMockResult === false) {
             throw new Error("Mock ad display failed");
         }
+        if (typeof this.adMockResult === "object" && this.adMockResult !== null) {
+            return this.adMockResult;
+        }
         return { result: true, mock: true, ad_format };
     }
 
@@ -140,6 +143,9 @@ export class MockPlatformAdapter extends PlatformAdapter {
         this.groupJoinCalls.push({ group_id, at: Date.now() });
         if (this.groupMockResult === false) {
             throw new Error("Mock group join failed");
+        }
+        if (typeof this.groupMockResult === "object" && this.groupMockResult !== null) {
+            return this.groupMockResult;
         }
         return { result: true, mock: true, group_id };
     }
@@ -237,9 +243,22 @@ export class VkBridgeAdapter extends PlatformAdapter {
 }
 
 /**
- * Проверка, запущено ли приложение с параметрами запуска VK Mini Apps.
+ * Проверка, запущено ли приложение в режиме VK Mini Apps.
+ * 
+ * Наличие параметров запуска в URL проверяется как первичный индикатор платформы.
+ * Важно: параметры URL не являются гарантией подлинности пользователя или среды.
+ * Окончательная авторизация и проверка подписи (HMAC-SHA256) производятся исключительно
+ * на сервере (/api/auth).
  */
-export function isVkMiniAppsMode(searchUrl = null) {
+export function isVkMiniAppsMode(searchUrl = null, bridge = null) {
+    const br = bridge !== null && bridge !== undefined
+        ? bridge
+        : (typeof window !== "undefined" ? window.vkBridge : null);
+
+    if (br && typeof br.send === "function") {
+        return true;
+    }
+
     let search = searchUrl;
     if (search === null && typeof window !== "undefined") {
         search = window.location.search;
@@ -248,15 +267,65 @@ export function isVkMiniAppsMode(searchUrl = null) {
     if (search.startsWith("?")) search = search.slice(1);
     try {
         const params = new URLSearchParams(search);
-        return Boolean(params.get("vk_user_id") && params.get("vk_app_id"));
+        const hasUser = Boolean(params.get("vk_user_id"));
+        const hasApp = Boolean(params.get("vk_app_id"));
+        const hasSign = Boolean(params.get("sign"));
+        return hasUser && (hasApp || hasSign);
     } catch {
         return false;
     }
 }
 
 /**
+ * Проверка, запущено ли приложение в окружении разработки (Development Mode).
+ * 
+ * Окружение считается Development Mode, если:
+ * 1. Явно указано config.forceMode === "development"
+ * 2. URL содержит параметр dev_user или mode=dev
+ * 3. Хост браузера localhost, 127.0.0.1 или пустой (локальный файл/Node.js) при отсутствии VK параметров
+ */
+export function isDevelopmentEnvironment(config = {}) {
+    if (config.forceMode === "development") return true;
+    if (config.forceMode === "vk_mini_apps") return false;
+
+    const search = config.searchUrl !== undefined
+        ? config.searchUrl
+        : (typeof window !== "undefined" ? window.location.search : "");
+
+    if (search) {
+        try {
+            const cleanSearch = search.startsWith("?") ? search.slice(1) : search;
+            const params = new URLSearchParams(cleanSearch);
+            if (params.has("dev_user") || params.get("mode") === "dev") {
+                return true;
+            }
+        } catch {}
+    }
+
+    if (typeof window !== "undefined") {
+        const hostname = window.location?.hostname || "";
+        if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "") {
+            return true;
+        }
+        return false;
+    }
+
+    // Для Node.js (тесты/скрипты)
+    if (config.devUser) return true;
+    if (config.isProduction || config.production) return false;
+    return true;
+}
+
+/**
  * Фабрика платформенного адаптера.
  * Автоматически выбирает VkBridgeAdapter или MockPlatformAdapter.
+ * 
+ * Правила выбора:
+ * 1. config.forceMode === "vk_mini_apps" -> VkBridgeAdapter
+ * 2. config.forceMode === "development" -> MockPlatformAdapter
+ * 3. Обнаружены признаки VK Mini Apps (параметры vk_* или window.vkBridge) -> VkBridgeAdapter
+ * 4. Обнаружено окружение разработки (localhost, 127.0.0.1, dev_user) -> MockPlatformAdapter
+ * 5. По умолчанию в продакшене (боевой хост без параметров VK) -> VkBridgeAdapter (защита от утечки моков)
  */
 export function createPlatformAdapter(config = {}) {
     if (config.forceMode === "vk_mini_apps") {
@@ -270,9 +339,61 @@ export function createPlatformAdapter(config = {}) {
         ? config.searchUrl
         : (typeof window !== "undefined" ? window.location.search : "");
 
-    if (isVkMiniAppsMode(search)) {
+    const bridge = config.bridge !== undefined ? config.bridge : null;
+
+    if (isVkMiniAppsMode(search, bridge)) {
         return new VkBridgeAdapter({ ...config, searchUrl: search });
     }
 
-    return new MockPlatformAdapter(config);
+    if (isDevelopmentEnvironment(config)) {
+        return new MockPlatformAdapter(config);
+    }
+
+    // Защита продакшена: предотвращаем неконтролируемый fallback на MockPlatformAdapter
+    return new VkBridgeAdapter({ ...config, searchUrl: search });
+}
+
+/**
+ * Менеджер показа нативной рекламы с учётом кулдауна (60 секунд).
+ * Обновляет время последнего показа только при подтверждённом успешном результате.
+ */
+export class AdCooldownManager {
+    constructor({ platformAdapter = null, cooldownMs = 60000 } = {}) {
+        this.platformAdapter = platformAdapter;
+        this.cooldownMs = cooldownMs;
+        this.lastAdShownAt = 0;
+    }
+
+    setPlatformAdapter(adapter) {
+        this.platformAdapter = adapter;
+    }
+
+    getLastAdShownAt() {
+        return this.lastAdShownAt;
+    }
+
+    setLastAdShownAt(timestamp) {
+        this.lastAdShownAt = Number(timestamp) || 0;
+    }
+
+    async maybeShowInterstitialAd() {
+        if (!this.platformAdapter) return false;
+        const now = Date.now();
+        if (now - this.lastAdShownAt < this.cooldownMs) {
+            return false;
+        }
+        try {
+            const response = await this.platformAdapter.showNativeAds({ ad_format: "interstitial" });
+            if (response && response.result === true) {
+                this.lastAdShownAt = Date.now();
+                return true;
+            }
+            return false;
+        } catch (err) {
+            if (typeof console !== "undefined" && console.warn) {
+                console.warn("Native ad notice:", err?.message || err);
+            }
+            return false;
+        }
+    }
 }

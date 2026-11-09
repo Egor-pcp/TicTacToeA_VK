@@ -14,11 +14,16 @@ import {
     getOrCreatePlayerIdentity
 } from "./player-stats.js";
 import { OnlineServerClient } from "./OnlineServerClient.js";
-import { createPlatformAdapter, isVkMiniAppsMode } from "./platform-adapter.js";
+import {
+    createPlatformAdapter,
+    isVkMiniAppsMode,
+    AdCooldownManager
+} from "./platform-adapter.js";
 
 let platformAdapter = null;
 let lastAdShownAt = 0;
 const AD_COOLDOWN_MS = 60000;
+const adCooldownManager = new AdCooldownManager({ cooldownMs: AD_COOLDOWN_MS });
 
 function getActiveUserId() {
     if (platformAdapter) {
@@ -38,17 +43,9 @@ function getActiveUserId() {
 }
 
 async function maybeShowInterstitialAd() {
-    if (!platformAdapter) return;
-    const now = Date.now();
-    if (now - lastAdShownAt < AD_COOLDOWN_MS) {
-        return;
-    }
-    lastAdShownAt = now;
-    try {
-        await platformAdapter.showNativeAds({ ad_format: "interstitial" });
-    } catch (err) {
-        console.warn("Native ad notice:", err?.message || err);
-    }
+    const shown = await adCooldownManager.maybeShowInterstitialAd();
+    lastAdShownAt = adCooldownManager.getLastAdShownAt();
+    return shown;
 }
 
 window.addEventListener("tictactoe:match-completed", event => {
@@ -1885,6 +1882,7 @@ function initCommunityLink() {
 // Инициализация при загрузке: платформа, отображение Dev-бейджа и проверка Reconnect
 (async function initClientEnvironment() {
     platformAdapter = createPlatformAdapter();
+    adCooldownManager.setPlatformAdapter(platformAdapter);
     try {
         await platformAdapter.init();
     } catch (err) {

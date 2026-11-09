@@ -6,7 +6,9 @@ import {
     MockPlatformAdapter,
     VkBridgeAdapter,
     createPlatformAdapter,
-    isVkMiniAppsMode
+    isVkMiniAppsMode,
+    isDevelopmentEnvironment,
+    AdCooldownManager
 } from "../../platform-adapter.js";
 import { OnlineServerClient } from "../../OnlineServerClient.js";
 import {
@@ -243,5 +245,106 @@ describe("VK-003-007: Платформенная интеграция (MockPlatf
         await assert.rejects(async () => {
             await failingAdapter.joinGroup({ group_id: 123 });
         }, /Mock group join failed/);
+    });
+
+    test("13. Защита продакшена: createPlatformAdapter без VK-параметров не возвращает MockPlatformAdapter", async () => {
+        const prodAdapter = createPlatformAdapter({ isProduction: true, searchUrl: "" });
+        assert.equal(prodAdapter instanceof VkBridgeAdapter, true);
+        assert.equal(prodAdapter.isMock, false);
+        assert.equal(prodAdapter.mode, "vk_mini_apps");
+        assert.equal(prodAdapter.getLaunchParams(), null);
+
+        // Попытка инициализации без моста в продакшене выбрасывает ошибку, а не тихо даёт доступ
+        await assert.rejects(async () => {
+            await prodAdapter.init();
+        }, /VK Bridge is not available/);
+    });
+
+    test("14. isVkMiniAppsMode валидирует параметры запуска и наличие bridge", () => {
+        // Полные параметры
+        assert.equal(isVkMiniAppsMode("?vk_user_id=123&vk_app_id=456&sign=abc"), true);
+        // Только user_id и sign
+        assert.equal(isVkMiniAppsMode("?vk_user_id=123&sign=abc"), true);
+        // Недостаточные параметры (только vk_user_id без app/sign)
+        assert.equal(isVkMiniAppsMode("?vk_user_id=123"), false);
+        // Параметры разработки
+        assert.equal(isVkMiniAppsMode("?dev_user=dev_user_1"), false);
+        // Пустая строка
+        assert.equal(isVkMiniAppsMode(""), false);
+        // Наличие bridge
+        assert.equal(isVkMiniAppsMode("", { send: async () => ({}) }), true);
+    });
+
+    test("15. AdCooldownManager: успешный показ рекламы обновляет lastAdShownAt и блокирует повторный вызов в пределах 60с", async () => {
+        const mockAdapter = new MockPlatformAdapter({ devUser: "dev_user_1" });
+        const manager = new AdCooldownManager({ platformAdapter: mockAdapter, cooldownMs: 60000 });
+
+        assert.equal(manager.getLastAdShownAt(), 0);
+
+        // Первый вызов — успешен
+        const firstResult = await manager.maybeShowInterstitialAd();
+        assert.equal(firstResult, true);
+        assert.equal(mockAdapter.adsCallCount, 1);
+        const shownAt = manager.getLastAdShownAt();
+        assert.equal(shownAt > 0, true);
+
+        // Второй вызов сразу же — блокируется кулдауном
+        const secondResult = await manager.maybeShowInterstitialAd();
+        assert.equal(secondResult, false);
+        assert.equal(mockAdapter.adsCallCount, 1); // Вызов платформы не производился
+        assert.equal(manager.getLastAdShownAt(), shownAt);
+    });
+
+    test("16. AdCooldownManager: сбой показа рекламы (throw) не обновляет lastAdShownAt и не блокирует повторную попытку", async () => {
+        const failingAdapter = new MockPlatformAdapter({ adMockResult: false });
+        const manager = new AdCooldownManager({ platformAdapter: failingAdapter, cooldownMs: 60000 });
+
+        const failResult = await manager.maybeShowInterstitialAd();
+        assert.equal(failResult, false);
+        assert.equal(manager.getLastAdShownAt(), 0); // Время не обновлено
+
+        // Сменяем адаптер на работающий — вызов сразу разрешается без ожидания 60с
+        const workingAdapter = new MockPlatformAdapter();
+        manager.setPlatformAdapter(workingAdapter);
+
+        const successResult = await manager.maybeShowInterstitialAd();
+        assert.equal(successResult, true);
+        assert.equal(manager.getLastAdShownAt() > 0, true);
+    });
+
+    test("17. AdCooldownManager: результат рекламы { result: false } не обновляет lastAdShownAt", async () => {
+        const rejectingAdapter = new MockPlatformAdapter({ adMockResult: { result: false } });
+        const manager = new AdCooldownManager({ platformAdapter: rejectingAdapter, cooldownMs: 60000 });
+
+        const rejectResult = await manager.maybeShowInterstitialAd();
+        assert.equal(rejectResult, false);
+        assert.equal(manager.getLastAdShownAt(), 0);
+    });
+
+    test("18. AdCooldownManager: показ рекламы разрешается после истечения 60 секунд", async () => {
+        const mockAdapter = new MockPlatformAdapter();
+        const manager = new AdCooldownManager({ platformAdapter: mockAdapter, cooldownMs: 60000 });
+
+        const first = await manager.maybeShowInterstitialAd();
+        assert.equal(first, true);
+
+        // Имитируем прошествие 61 секунды
+        manager.setLastAdShownAt(Date.now() - 61000);
+
+        const afterCooldown = await manager.maybeShowInterstitialAd();
+        assert.equal(afterCooldown, true);
+        assert.equal(mockAdapter.adsCallCount, 2);
+    });
+
+    test("19. OnlineServerClient с VkBridgeAdapter без launchParams не подставляет dev_user_1 и отклоняет авторизацию", async () => {
+        const vkAdapterNoParams = new VkBridgeAdapter({ launchParams: null, searchUrl: "" });
+        const client = new OnlineServerClient({ platformAdapter: vkAdapterNoParams });
+
+        assert.equal(client.launchParams, null);
+        assert.equal(client.devUser, null);
+
+        await assert.rejects(async () => {
+            await client.authenticate();
+        }, /Missing authentication credentials/);
     });
 });
