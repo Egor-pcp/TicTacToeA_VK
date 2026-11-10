@@ -330,7 +330,75 @@ describe("Клиентский модуль OnlineServerClient", () => {
         assert.equal(client.state, "idle");
     });
 
-    test("3. Сквозной онлайн-матч между двумя клиентами (ход, подтверждение, победа)", async () => {
+    test("3. Смена размера обновляет единственную запись очереди без нового секундомера", async () => {
+        const client1 = new OnlineServerClient({
+            serverUrl: "http://localhost:8787",
+            devUser: "dev_user_1"
+        });
+
+        const initialSearch = waitForEvent(client1, "searching");
+        await client1.startSearch(3);
+        assert.equal((await initialSearch).boardSize, 3);
+
+        const resizeTo4 = waitForEvent(client1, "searching");
+        assert.equal(client1.updateSearchBoardSize(4), true);
+        assert.equal((await resizeTo4).boardSize, 4);
+
+        const resizeTo5 = waitForEvent(client1, "searching");
+        assert.equal(client1.updateSearchBoardSize(5), true);
+        assert.equal((await resizeTo5).boardSize, 5);
+
+        const waitingRows = matchmakerInstance.ctx.storage.sql.exec(
+            "SELECT user_id, board_size FROM waiting_queue WHERE user_id = ?",
+            "dev_user_1"
+        ).toArray();
+        assert.equal(waitingRows.length, 1);
+        assert.equal(waitingRows[0].user_id, "dev_user_1");
+        assert.equal(waitingRows[0].board_size, 5);
+
+        const client2 = new OnlineServerClient({
+            serverUrl: "http://localhost:8787",
+            devUser: "dev_user_2"
+        });
+        const match1 = waitForEvent(client1, "match_start");
+        const match2 = waitForEvent(client2, "match_start");
+        await client2.startSearch(5);
+        const [start1, start2] = await Promise.all([match1, match2]);
+        assert.equal(start1.matchId, start2.matchId);
+        assert.equal(start1.boardSize, 5);
+        assert.equal(start2.boardSize, 5);
+
+        client1.dispose();
+        client2.dispose();
+    });
+
+    test("4. Отмена поиска во время незавершённой авторизации не открывает очередь позже", async () => {
+        const originalFetchStub = globalThis.fetch;
+        let resolveAuth;
+        globalThis.fetch = () => new Promise(resolve => { resolveAuth = resolve; });
+
+        const client = new OnlineServerClient({
+            serverUrl: "http://localhost:8787",
+            devUser: "dev_user_1"
+        });
+        try {
+            const startPromise = client.startSearch(3);
+            await Promise.resolve();
+            client.cancelSearch();
+            resolveAuth(new Response(JSON.stringify({ token: "test-token", userId: "dev_user_1" }), {
+                status: 200,
+                headers: { "Content-Type": "application/json" }
+            }));
+            await startPromise;
+            assert.equal(client.state, "idle");
+            assert.equal(client._socket, null);
+        } finally {
+            globalThis.fetch = originalFetchStub;
+            client.dispose();
+        }
+    });
+
+    test("5. Сквозной онлайн-матч между двумя клиентами (ход, подтверждение, победа)", async () => {
         const client1 = new OnlineServerClient({
             serverUrl: "http://localhost:8787",
             devUser: "dev_user_1"
@@ -402,7 +470,7 @@ describe("Клиентский модуль OnlineServerClient", () => {
         client2.dispose();
     });
 
-    test("4. Отклонение хода не в свою очередь", async () => {
+    test("6. Отклонение хода не в свою очередь", async () => {
         const client1 = new OnlineServerClient({
             serverUrl: "http://localhost:8787",
             devUser: "dev_user_1"
@@ -434,7 +502,7 @@ describe("Клиентский модуль OnlineServerClient", () => {
         client2.dispose();
     });
 
-    test("5. Ничья на доске 3x3 (draw)", async () => {
+    test("7. Ничья на доске 3x3 (draw)", async () => {
         const client1 = new OnlineServerClient({ serverUrl: "http://localhost:8787", devUser: "dev_user_1" });
         const client2 = new OnlineServerClient({ serverUrl: "http://localhost:8787", devUser: "dev_user_2" });
 
@@ -475,7 +543,7 @@ describe("Клиентский модуль OnlineServerClient", () => {
         client2.dispose();
     });
 
-    test("6. Онлайн-матч на доске 4x4", async () => {
+    test("8. Онлайн-матч на доске 4x4", async () => {
         const client1 = new OnlineServerClient({ serverUrl: "http://localhost:8787", devUser: "dev_user_1" });
         const client2 = new OnlineServerClient({ serverUrl: "http://localhost:8787", devUser: "dev_user_2" });
 
@@ -493,7 +561,7 @@ describe("Клиентский модуль OnlineServerClient", () => {
         client2.dispose();
     });
 
-    test("7. Временный дисконнект и восстановление связи (reconnect)", async () => {
+    test("9. Временный дисконнект и восстановление связи (reconnect)", async () => {
         const client1 = new OnlineServerClient({ serverUrl: "http://localhost:8787", devUser: "dev_user_1" });
         const client2 = new OnlineServerClient({ serverUrl: "http://localhost:8787", devUser: "dev_user_2" });
 

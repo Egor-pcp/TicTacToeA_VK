@@ -23,12 +23,33 @@ export class Matchmaker {
                 last_seen INTEGER NOT NULL
             )
         `);
+        this.ctx.storage.sql.exec(`
+            CREATE TABLE IF NOT EXISTS active_matches (
+                user_id TEXT PRIMARY KEY,
+                match_id TEXT NOT NULL,
+                board_size INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                opponent_id TEXT NOT NULL,
+                opponent_name TEXT,
+                opponent_avatar TEXT,
+                status TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+        `);
+        this.ctx.storage.sql.exec(
+            "CREATE INDEX IF NOT EXISTS idx_active_matches_id ON active_matches(match_id)"
+        );
         this.ctx.storage.sql.exec(
             "CREATE INDEX IF NOT EXISTS idx_waiting_size_time ON waiting_queue(board_size, joined_at)"
         );
     }
 
     async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === "/match-ended" && request.method === "POST") {
+            return this.handleMatchEnded(request);
+        }
+
         if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
             return new Response("Expected WebSocket upgrade", { status: 426 });
         }
@@ -55,8 +76,8 @@ export class Matchmaker {
         this.sockets.set(userId, server);
 
         server.addEventListener("message", event => this.onMessage(userId, event));
-        server.addEventListener("close", () => this.onSocketClose(userId));
-        server.addEventListener("error", () => this.onSocketClose(userId));
+        server.addEventListener("close", () => this.onSocketClose(userId, server));
+        server.addEventListener("error", () => this.onSocketClose(userId, server));
 
         server.send(JSON.stringify({ type: "auth_ok", userId }));
 
@@ -104,6 +125,39 @@ export class Matchmaker {
         const userName = typeof message.profile?.name === "string" ? message.profile.name : `Игрок ${userId.slice(-4)}`;
         const userAvatar = typeof message.profile?.avatar === "string" ? message.profile.avatar : null;
 
+        const activeMatch = this.ctx.storage.sql.exec(
+            "SELECT * FROM active_matches WHERE user_id = ?",
+            userId
+        ).toArray()[0];
+        if (activeMatch) {
+            if (activeMatch.status === "completed") {
+                this.ctx.storage.sql.exec(
+                    "DELETE FROM active_matches WHERE match_id = ?",
+                    activeMatch.match_id
+                );
+            } else if (activeMatch.status === "starting") {
+                return this.sendToUser(userId, {
+                    type: "match_start_pending",
+                    matchId: activeMatch.match_id,
+                    boardSize: activeMatch.board_size
+                });
+            } else {
+                return this.sendToUser(userId, {
+                    type: "match_already_started",
+                    matchId: activeMatch.match_id,
+                    boardSize: activeMatch.board_size,
+                    role: activeMatch.role,
+                    turn: "X",
+                    turnDeadlineMs: DEFAULT_TURN_DEADLINE_MS,
+                    opponent: {
+                        id: activeMatch.opponent_id,
+                        name: activeMatch.opponent_name,
+                        avatar: activeMatch.opponent_avatar
+                    }
+                });
+            }
+        }
+
         // Проверяем: не находится ли пользователь уже в очереди
         const existing = this.ctx.storage.sql.exec(
             "SELECT user_id, board_size FROM waiting_queue WHERE user_id = ?",
@@ -120,11 +174,9 @@ export class Matchmaker {
                 );
                 return this.sendToUser(userId, { type: "searching", boardSize });
             }
-            // Если сменил размер — обновляем
+            // Смена размера снимает старую запись; повторный INSERT ниже создаёт новую FIFO-позицию.
             this.ctx.storage.sql.exec(
-                "UPDATE waiting_queue SET board_size = ?, last_seen = ? WHERE user_id = ?",
-                boardSize,
-                now,
+                "DELETE FROM waiting_queue WHERE user_id = ?",
                 userId
             );
         }
@@ -187,24 +239,48 @@ export class Matchmaker {
 
         const matchId = crypto.randomUUID();
 
+        this.ctx.storage.sql.exec(`
+            INSERT INTO active_matches (
+                user_id, match_id, board_size, role, opponent_id, opponent_name,
+                opponent_avatar, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'starting', ?), (?, ?, ?, ?, ?, ?, ?, 'starting', ?)
+        `,
+        playerX.id, matchId, boardSize, "X", playerO.id, playerO.name, playerO.avatar, now,
+        playerO.id, matchId, boardSize, "O", playerX.id, playerX.name, playerX.avatar, now);
+
         // Инициализируем отдельный Match Durable Object для этой партии
-        if (this.env?.MATCH) {
-            try {
-                const matchDO = this.env.MATCH.get(this.env.MATCH.idFromName(matchId));
-                await matchDO.fetch(new Request("https://internal/init", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        matchId,
-                        boardSize,
-                        playerX,
-                        playerO
-                    })
-                }));
-            } catch (initErr) {
-                console.error("Match DO initialization error:", initErr);
-            }
+        if (!this.env?.MATCH) {
+            this.ctx.storage.sql.exec("DELETE FROM active_matches WHERE match_id = ?", matchId);
+            this.sendToUser(playerX.id, { type: "error", message: "Match service is unavailable" });
+            this.sendToUser(playerO.id, { type: "error", message: "Match service is unavailable" });
+            return;
         }
+
+        try {
+            const matchDO = this.env.MATCH.get(this.env.MATCH.idFromName(matchId));
+            const initResponse = await matchDO.fetch(new Request("https://internal/init", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    matchId,
+                    boardSize,
+                    playerX,
+                    playerO
+                })
+            }));
+            if (!initResponse.ok) throw new Error(`Match DO initialization failed: ${initResponse.status}`);
+        } catch (initErr) {
+            console.error("Match DO initialization error:", initErr);
+            this.ctx.storage.sql.exec("DELETE FROM active_matches WHERE match_id = ?", matchId);
+            this.sendToUser(playerX.id, { type: "error", message: "Не удалось создать матч. Попробуйте поиск снова." });
+            this.sendToUser(playerO.id, { type: "error", message: "Не удалось создать матч. Попробуйте поиск снова." });
+            return;
+        }
+
+        this.ctx.storage.sql.exec(
+            "UPDATE active_matches SET status = 'active' WHERE match_id = ?",
+            matchId
+        );
 
         // Уведомляем игрока X
         this.sendToUser(playerX.id, {
@@ -245,6 +321,26 @@ export class Matchmaker {
         this.sendToUser(userId, { type: "search_canceled" });
     }
 
+    async handleMatchEnded(request) {
+        let data;
+        try {
+            data = await request.json();
+        } catch {
+            return new Response("Invalid JSON", { status: 400 });
+        }
+        if (typeof data?.matchId !== "string" || !data.matchId) {
+            return new Response("Missing matchId", { status: 400 });
+        }
+
+        this.ctx.storage.sql.exec(
+            "UPDATE active_matches SET status = 'completed' WHERE match_id = ?",
+            data.matchId
+        );
+        return new Response(JSON.stringify({ ok: true }), {
+            headers: { "Content-Type": "application/json" }
+        });
+    }
+
     handleHeartbeat(userId, now) {
         this.ctx.storage.sql.exec(
             "UPDATE waiting_queue SET last_seen = ? WHERE user_id = ?",
@@ -254,7 +350,8 @@ export class Matchmaker {
         this.sendToUser(userId, { type: "heartbeat_ack" });
     }
 
-    onSocketClose(userId) {
+    onSocketClose(userId, socket) {
+        if (socket && this.sockets.get(userId) !== socket) return;
         this.sockets.delete(userId);
         this.ctx.storage.sql.exec(
             "DELETE FROM waiting_queue WHERE user_id = ?",

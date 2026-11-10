@@ -20,6 +20,11 @@ import {
     isDevelopmentEnvironment,
     AdCooldownManager
 } from "./platform-adapter.js";
+import {
+    canPlayOnlinePractice,
+    createOnlinePracticeState,
+    transitionOnlinePracticeState
+} from "./online-session-state.js";
 
 let platformAdapter = null;
 let lastAdShownAt = 0;
@@ -107,7 +112,7 @@ let onlinePeerId = null;
 let onlineErrorMessage = "";
 let searchStartedAt = null;
 let searchTimerInterval = null;
-let onlinePracticeClockStarted = false;
+let onlinePracticeState = createOnlinePracticeState();
 let onlineMatch = null;
 let onlineResultMessage = "";
 let opponentDisconnectTimer = null;
@@ -118,6 +123,15 @@ let reconnectedMessageTimeout = null;
 const ONLINE_GAME_PROTOCOL = "tictactoe-game-v1";
 const ONLINE_BOARD_SIZES = new Set([3, 4, 5]);
 const ONLINE_DIFFICULTIES = new Set(["easy", "medium", "hard"]);
+
+function updateBoardSizeSelection(size) {
+    selectedBoardSize = Number(size);
+    document.querySelectorAll('[data-choice-group="size"]').forEach(button => {
+        const isSelected = Number(button.dataset.boardSize) === selectedBoardSize;
+        button.classList.toggle("is-selected", isSelected);
+        button.setAttribute("aria-pressed", String(isSelected));
+    });
+}
 
 function createMatchId() {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -502,7 +516,6 @@ function startSearchTimer() {
 }
 
 function startOnlinePracticeClock() {
-    onlinePracticeClockStarted = true;
     resetMatchTimers(null);
 }
 
@@ -553,7 +566,7 @@ function updateOnlinePlayerCard() {
             : currentPlayer === "O" ? "Ход соперника" : "Ожидание";
     } else if (onlineState === "searching") {
         playerStatuses[1].textContent = "Ожидание";
-    } else if (onlineState === "connecting") {
+    } else if (onlineState === "starting" || onlineState === "connecting") {
         playerStatuses[1].textContent = "Подключение...";
     } else if (onlineState === "ready") {
         playerStatuses[1].textContent = "Ожидание матча";
@@ -629,9 +642,10 @@ function renderBoard() {
 
 // Обновляем надписи и подсветку активного игрока.
 function updateInterface() {
-    const onlinePractice = gameMode === "online" && onlineState === "searching";
+    const onlinePractice = gameMode === "online" && canPlayOnlinePractice(onlinePracticeState);
     const onlineMessages = {
         searching: "Поиск игрока, а пока сыграй сам с собой.",
+        starting: "Подключаемся к поиску. Практика доступна.",
         connecting: "Игрок найден! Устанавливаем соединение…",
         ready: gameOver && onlineResultMessage
             ? onlineResultMessage
@@ -642,7 +656,7 @@ function updateInterface() {
                     : onlineMatch?.started
                         ? currentPlayer === onlineMatch.localSide ? "Твой ход" : "Ход соперника"
                         : "Соединение установлено. Готовимся к матчу…",
-        error: onlineErrorMessage || "Не удалось подключиться. Попробуй начать поиск снова."
+        error: onlineErrorMessage || "Онлайн временно недоступен. Практика остаётся доступна."
     };
 
     if (gameMode === "online") {
@@ -662,14 +676,16 @@ function updateInterface() {
     statusText.classList.toggle("is-online-searching", onlinePractice);
 
     if (gameMode === "online") {
-        if (onlineState === "searching") {
-            restartButton.textContent = "✕ Отменить поиск";
+        if (onlinePractice) {
+            restartButton.textContent = gameStarted || gameOver ? "↻ Новая практика" : "Начать практику";
             restartButton.disabled = false;
         } else if (gameOver) {
             restartButton.textContent = "🔍 Новый поиск";
             restartButton.disabled = false;
         } else {
-            restartButton.textContent = "В игре";
+            restartButton.textContent = onlineState === "starting" || onlineState === "connecting"
+                ? "Подключение..."
+                : "В игре";
             restartButton.disabled = true;
         }
     } else {
@@ -714,14 +730,16 @@ function updateInterface() {
 
 // Завершаем партию и подсвечиваем победную комбинацию.
 function finishGame(message, outcome, winner = null, winningCombination = [], { broadcastOnline = true } = {}) {
-    const isOnlinePractice = gameMode === "online" && onlineState === "searching";
+    const isOnlinePractice = gameMode === "online" && canPlayOnlinePractice(onlinePracticeState) && !onlineMatch?.started;
     if (gameOver || (!activeMatch && !isOnlinePractice)) return;
 
     console.log(`Игра завершена: ${message}`);
     gameOver = true;
     statusText.textContent = message;
     const finalMatchDuration = timerState.finish();
-    if (isOnlinePractice) onlinePracticeClockStarted = false;
+    if (isOnlinePractice) {
+        onlinePracticeState = transitionOnlinePracticeState(onlinePracticeState, "practice-finished");
+    }
     const matchSnapshot = activeMatch;
     const playerOutcome = matchSnapshot?.mode === "online"
         ? winner === null ? "draw" : winner === onlineMatch?.localSide ? "win" : "loss"
@@ -778,7 +796,7 @@ function showMove(index, player) {
 // Обрабатываем ход человека.
 function handleCellClick(event) {
     const index = Number(event.currentTarget.dataset.index);
-    const isOnlinePractice = gameMode === "online" && onlineState === "searching";
+    const isOnlinePractice = gameMode === "online" && canPlayOnlinePractice(onlinePracticeState) && !onlineMatch?.started;
     const isOnlineMatch = gameMode === "online" && onlineState === "ready" && onlineMatch?.started && !isOpponentDisconnected;
 
     if (gameOver || (gameMode === "computer" && currentPlayer !== "X") ||
@@ -918,7 +936,6 @@ function prepareOnlineSearch() {
     gameOver = false;
     gameStarted = false;
     activeMatch = null;
-    onlinePracticeClockStarted = false;
     stopTimerDisplay();
     timerState.reset();
     matchTimeValue.classList.remove(
@@ -950,11 +967,21 @@ function isCloudflareQuotaError(message, error) {
 function handleOnlineError(message, error) {
     stopSearchTimer();
     const interruptedMatch = abandonActiveOnlineMatch();
+    onlinePracticeState = transitionOnlinePracticeState(onlinePracticeState, "search-failed");
+    const practiceAvailable = gameMode === "online" && canPlayOnlinePractice(onlinePracticeState);
     onlineState = "error";
-    onlineErrorMessage = isCloudflareQuotaError(message, error)
-        ? "Лимит на сегодня исчерпан"
-        : "Онлайн временно недоступен";
-    if (!interruptedMatch && !onlineMatch?.completed) pauseUntrackedOnlineGame();
+    const details = String(message ?? error?.message ?? "");
+    if (isCloudflareQuotaError(message, error)) {
+        onlineErrorMessage = "Лимит на сегодня исчерпан";
+    } else if (/failed to fetch|fetch failed|err_connection_refused|networkerror/i.test(details)) {
+        onlineErrorMessage = "Не удалось подключиться к серверу поиска. Проверьте, что локальный Worker запущен.";
+    } else if (/missing authentication credentials|vk bridge is not available/i.test(details)) {
+        onlineErrorMessage = "Для онлайн-поиска недоступны VK Bridge или параметры авторизации.";
+    } else {
+        onlineErrorMessage = "Онлайн временно недоступен";
+    }
+    if (practiceAvailable) onlineErrorMessage += " Практика доступна, поиск не активен.";
+    if (!interruptedMatch && !onlineMatch?.completed && !practiceAvailable) pauseUntrackedOnlineGame();
     updateInterface();
     updateTimerDisplay();
 }
@@ -1051,11 +1078,41 @@ function setupOnlineClientListeners(client, requestId) {
         updateTimerDisplay();
     });
 
+    client.on("match_start_pending", data => {
+        if (!isCurrentClient()) return;
+        stopSearchTimer();
+        onlinePracticeState = transitionOnlinePracticeState(onlinePracticeState, "match-found");
+        cancelComputerMoveTimer();
+        gameStarted = false;
+        gameOver = false;
+        activeMatch = null;
+        currentPlayer = "X";
+        boardSize = Number(data.boardSize) || boardSize;
+        updateBoardSizeSelection(boardSize);
+        stopTimerDisplay();
+        timerState.reset();
+        onlineState = "connecting";
+        updateInterface();
+        updateTimerDisplay();
+    });
+
     client.on("match_start", data => {
         if (!isCurrentClient()) return;
         stopDisconnectCountdown();
         isOpponentDisconnected = false;
         stopSearchTimer();
+        onlinePracticeState = transitionOnlinePracticeState(onlinePracticeState, "match-found");
+        cancelComputerMoveTimer();
+        gameStarted = false;
+        gameOver = false;
+        activeMatch = null;
+        currentPlayer = "X";
+        boardSize = Number(data.boardSize) || boardSize;
+        updateBoardSizeSelection(boardSize);
+        board = Array(boardSize * boardSize).fill("");
+        stopTimerDisplay();
+        timerState.reset();
+        renderBoard();
         onlinePeerId = data.opponent?.name || `Игрок ${data.opponent?.id?.slice(-4) || ""}`;
         onlineState = "connecting";
         startTimerDisplay();
@@ -1069,6 +1126,7 @@ function setupOnlineClientListeners(client, requestId) {
         onlinePeerId = snapshot.opponent?.name || `Игрок ${snapshot.opponent?.id?.slice(-4) || ""}`;
 
         boardSize = snapshot.boardSize;
+        updateBoardSizeSelection(snapshot.boardSize);
         board = [...snapshot.board];
         renderBoard();
 
@@ -1216,6 +1274,11 @@ function setupOnlineClientListeners(client, requestId) {
         if (isCurrentClient()) handleOnlineError(message, error);
     });
 
+    client.on("close", ({ code, reason }) => {
+        if (!isCurrentClient() || !["starting", "searching"].includes(onlineState)) return;
+        handleOnlineError(`Соединение с сервером поиска закрыто (${code ?? "без кода"}${reason ? `: ${reason}` : ""})`);
+    });
+
     client.on("search_canceled", () => {
         if (isCurrentClient()) switchToComputer("Поиск отменён");
     });
@@ -1239,18 +1302,27 @@ async function startOnlineSearch() {
 
     prepareOnlineSearch();
     gameMode = "online";
-    onlineState = "searching";
+    onlinePracticeState = transitionOnlinePracticeState(onlinePracticeState, "search-started");
+    onlineState = "starting";
     onlineStartPending = false;
     onlinePeerId = null;
     onlineErrorMessage = "";
     onlineMatch = null;
     onlineResultMessage = "";
 
-    const client = new OnlineServerClient({ platformAdapter });
+    let client;
+    try {
+        client = new OnlineServerClient({ platformAdapter });
+    } catch (error) {
+        handleOnlineError(error.message, error);
+        return;
+    }
     onlineServerClient = client;
     const isCurrentClient = () => onlineServerClient === client && requestId === onlineStartRequestId;
 
     setupOnlineClientListeners(client, requestId);
+    updateInterface();
+    updateTimerDisplay();
 
     try {
         let profileName = client.devUser === "dev_user_2" ? "Игрок 2" : "Игрок 1";
@@ -1262,10 +1334,18 @@ async function startOnlineSearch() {
                 }
             } catch {}
         }
+        if (!isCurrentClient()) {
+            client.dispose();
+            return;
+        }
         const profile = { name: profileName };
         await client.startSearch(selectedBoardSize, profile);
+        if (!isCurrentClient()) {
+            client.cancelSearch();
+            client.dispose();
+        }
     } catch (error) {
-        if (isCurrentClient()) handleOnlineError(error.message);
+        if (isCurrentClient()) handleOnlineError(error.message, error);
     }
 
     updateInterface();
@@ -1282,9 +1362,10 @@ function switchToComputer(notice = "") {
         reconnectedMessageTimeout = null;
     }
     isOpponentDisconnected = false;
+    onlinePracticeState = transitionOnlinePracticeState(onlinePracticeState, "search-cancelled");
 
     if (onlineServerClient) {
-        if (onlineState === "searching") {
+        if (["starting", "searching"].includes(onlineState)) {
             onlineServerClient.cancelSearch();
         } else {
             onlineServerClient.dispose();
@@ -1296,7 +1377,6 @@ function switchToComputer(notice = "") {
     onlineErrorMessage = "";
     onlineState = "idle";
     gameMode = "computer";
-    onlinePracticeClockStarted = false;
     cancelComputerMoveTimer();
     applySelectedBoardSizeToNewGame();
     applySelectedDifficultyToNewGame();
@@ -1318,7 +1398,7 @@ function switchToComputer(notice = "") {
 function handleModeButton(button) {
     if (button.dataset.mode === "computer") {
         if (gameMode === "online" || onlineStartPending) {
-            const notice = onlineStartPending || ["searching", "connecting", "ready"].includes(onlineState)
+            const notice = onlineStartPending || ["starting", "searching", "connecting", "ready"].includes(onlineState)
                 ? "Поиск отменён"
                 : "";
             switchToComputer(notice);
@@ -1328,7 +1408,7 @@ function handleModeButton(button) {
         return;
     }
 
-    if (gameMode === "online" && ["searching", "connecting", "ready"].includes(onlineState)) {
+    if (gameMode === "online" && ["starting", "searching", "connecting", "ready"].includes(onlineState)) {
         switchToComputer("Поиск отменён");
         return;
     }
@@ -1338,7 +1418,7 @@ function handleModeButton(button) {
 
 function startGame() {
     if (gameStarted || gameOver) return;
-    if (gameMode === "online" && onlineState !== "searching") return;
+    if (gameMode === "online" && !canPlayOnlinePractice(onlinePracticeState)) return;
     gameStarted = true;
     applySelectedDifficultyToNewGame();
     activeMatch = gameMode === "computer" ? createActiveMatch() : null;
@@ -1353,7 +1433,8 @@ function restartGame() {
             startOnlineSearch();
             return;
         }
-        if (onlineState !== "searching") return;
+        if (!canPlayOnlinePractice(onlinePracticeState)) return;
+        onlinePracticeState = transitionOnlinePracticeState(onlinePracticeState, "practice-restarted");
         cancelComputerMoveTimer();
         applySelectedBoardSizeToNewGame();
         currentPlayer = "X";
@@ -1391,8 +1472,9 @@ updateTimerDisplay();
 
 restartButton.addEventListener("click", () => {
     if (gameMode === "online") {
-        if (onlineState === "searching") {
-            switchToComputer("Поиск отменён");
+        if (canPlayOnlinePractice(onlinePracticeState)) {
+            if (!gameStarted && !gameOver) startGame();
+            else restartGame();
             return;
         }
         if (gameOver) {
@@ -1465,6 +1547,11 @@ document.querySelectorAll("[data-choice-group]").forEach(button => {
         });
 
         if (boardSizeChanged) {
+            if (gameMode === "online" && canPlayOnlinePractice(onlinePracticeState) &&
+                ["starting", "searching"].includes(onlineState)) {
+                onlineServerClient?.updateSearchBoardSize(selectedBoardSize);
+            }
+
             if (gameStarted || gameOver) {
                 restartGame();
             } else {

@@ -201,6 +201,10 @@ describe("Серверный онлайн-мультиплеер TicTacToeA_VK",
                     }
                     return matchInstances.get(id);
                 }
+            },
+            MATCHMAKER: {
+                idFromName: () => "global-queue",
+                get: () => matchmaker
             }
         };
 
@@ -334,8 +338,65 @@ describe("Серверный онлайн-мультиплеер TicTacToeA_VK",
         assert.equal(rows[0].count, 1);
     });
 
-    // 5. Жребий X/O работает честно (проверка распределения 50/50)
-    test("5. Жребий X/O честно распределяет роли 50/50 при создании матчей", async () => {
+    test("5. Смена размера заменяет запись очереди, а найденный игрок не ставится в очередь повторно", async () => {
+        const client1 = await connectUserToMatchmaker("player_resize_1");
+        client1.send(JSON.stringify({ type: "find_match", boardSize: 3 }));
+        await waitForMessage(client1, "searching");
+
+        const matchStart1 = waitForMessage(client1, "match_start");
+        client1.send(JSON.stringify({ type: "find_match", boardSize: 5 }));
+        const resized = await waitForMessage(client1, "searching");
+        assert.equal(resized.boardSize, 5);
+
+        let queueRows = matchmaker.ctx.storage.sql.exec(
+            "SELECT user_id, board_size FROM waiting_queue WHERE user_id = ?",
+            "player_resize_1"
+        ).toArray();
+        assert.equal(queueRows.length, 1);
+        assert.equal(queueRows[0].board_size, 5);
+
+        const client2 = await connectUserToMatchmaker("player_resize_2");
+        const matchStart2 = waitForMessage(client2, "match_start");
+        client2.send(JSON.stringify({ type: "find_match", boardSize: 5 }));
+        const [start1, start2] = await Promise.all([matchStart1, matchStart2]);
+        assert.equal(start1.matchId, start2.matchId);
+        assert.equal(start1.boardSize, 5);
+        assert.equal(start2.boardSize, 5);
+
+        // Имитация последнего resize-пакета, уже отправленного до match_start.
+        client1.send(JSON.stringify({ type: "find_match", boardSize: 4 }));
+        const alreadyMatched = await waitForMessage(client1, "match_already_started");
+        assert.equal(alreadyMatched.matchId, start1.matchId);
+        assert.equal(alreadyMatched.boardSize, 5);
+        queueRows = matchmaker.ctx.storage.sql.exec(
+            "SELECT user_id FROM waiting_queue WHERE user_id = ?",
+            "player_resize_1"
+        ).toArray();
+        assert.equal(queueRows.length, 0);
+
+        const client3 = await connectUserToMatchmaker("player_resize_3");
+        client3.send(JSON.stringify({ type: "find_match", boardSize: 5 }));
+        const waiting = await waitForMessage(client3, "searching");
+        assert.equal(waiting.boardSize, 5);
+        const activeQueueRows = matchmaker.ctx.storage.sql.exec(
+            "SELECT user_id FROM waiting_queue WHERE board_size = ?",
+            5
+        ).toArray();
+        assert.deepEqual(activeQueueRows.map(row => row.user_id), ["player_resize_3"]);
+
+        await matchInstances.get(start1.matchId).finishMatch("draw", "draw");
+        const releasedMatches = matchmaker.ctx.storage.sql.exec(
+            "SELECT user_id, status FROM active_matches WHERE match_id = ?",
+            start1.matchId
+        ).toArray();
+        assert.deepEqual(releasedMatches.map(row => row.status), ["completed", "completed"]);
+        const searchAfterCompletion = waitForMessage(client1, "searching");
+        client1.send(JSON.stringify({ type: "find_match", boardSize: 3 }));
+        assert.equal((await searchAfterCompletion).boardSize, 3);
+    });
+
+    // 6. Жребий X/O работает честно (проверка распределения 50/50)
+    test("6. Жребий X/O честно распределяет роли 50/50 при создании матчей", async () => {
         let xCount = 0;
         const totalMatches = 40;
 
@@ -399,7 +460,7 @@ describe("Серверный онлайн-мультиплеер TicTacToeA_VK",
     }
 
     // 6. Ход и победа X
-    test("6. Ход и победа X: корректное завершение с winningLine и записью", async () => {
+    test("7. Ход и победа X: корректное завершение с winningLine и записью", async () => {
         const { matchDO, socketX, socketO } = await setupDirectMatch(3);
 
         const endPromiseX = waitForMessage(socketX, "match_ended");
@@ -430,7 +491,7 @@ describe("Серверный онлайн-мультиплеер TicTacToeA_VK",
     });
 
     // 7. Ход и победа O
-    test("7. Ход и победа O: корректное завершение", async () => {
+    test("8. Ход и победа O: корректное завершение", async () => {
         const { matchDO, socketX, socketO } = await setupDirectMatch(3);
 
         const endPromise = waitForMessage(socketO, "match_ended");
@@ -460,7 +521,7 @@ describe("Серверный онлайн-мультиплеер TicTacToeA_VK",
     });
 
     // 8. Ничья (draw)
-    test("8. Ничья: полное заполнение доски без победителя", async () => {
+    test("9. Ничья: полное заполнение доски без победителя", async () => {
         const { matchDO, socketX, socketO } = await setupDirectMatch(3);
 
         const endPromise = waitForMessage(socketX, "match_ended");
@@ -498,7 +559,7 @@ describe("Серверный онлайн-мультиплеер TicTacToeA_VK",
     });
 
     // 9. Отклонение некорректного хода (invalid_move)
-    test("9. Некорректный ход (вне доски, в занятую клетку) отклоняется с invalid_move", async () => {
+    test("10. Некорректный ход (вне доски, в занятую клетку) отклоняется с invalid_move", async () => {
         const { socketX } = await setupDirectMatch(3);
 
         // Ход за пределы доски
@@ -518,7 +579,7 @@ describe("Серверный онлайн-мультиплеер TicTacToeA_VK",
     });
 
     // 10. Нарушение очередности ходов
-    test("10. Ход не в свою очередь отклоняется сервером", async () => {
+    test("11. Ход не в свою очередь отклоняется сервером", async () => {
         const { socketO } = await setupDirectMatch(3);
 
         // Игрок O пытается походить первым (хотя первым ходит X)
@@ -529,7 +590,7 @@ describe("Серверный онлайн-мультиплеер TicTacToeA_VK",
     });
 
     // 11. Идемпотентность ходов (seq sequence numbers)
-    test("11. Идемпотентность: повторный пакет с тем же seq не дублирует ход", async () => {
+    test("12. Идемпотентность: повторный пакет с тем же seq не дублирует ход", async () => {
         const { matchDO, socketX } = await setupDirectMatch(3);
 
         socketX.send(JSON.stringify({ type: "make_move", index: 0, seq: 1 }));
@@ -547,7 +608,7 @@ describe("Серверный онлайн-мультиплеер TicTacToeA_VK",
     });
 
     // 12. Тайм-аут хода (Turn Timeout via Alarm)
-    test("12. Тайм-аут хода: присуждение поражения при истечении времени", async () => {
+    test("13. Тайм-аут хода: присуждение поражения при истечении времени", async () => {
         const { matchDO, socketX, socketO } = await setupDirectMatch(3);
 
         const endPromiseX = waitForMessage(socketX, "match_ended");
@@ -567,7 +628,7 @@ describe("Серверный онлайн-мультиплеер TicTacToeA_VK",
     });
 
     // 13. Временный дисконнект и reconnect_match
-    test("13. Временный дисконнект и reconnect: отправка snapshot и восстановление партии", async () => {
+    test("14. Временный дисконнект и reconnect: отправка snapshot и восстановление партии", async () => {
         const { matchDO, matchId, socketX, socketO } = await setupDirectMatch(3);
 
         // Игрок X делает первый ход
@@ -612,7 +673,7 @@ describe("Серверный онлайн-мультиплеер TicTacToeA_VK",
     });
 
     // 14. Окончательный дисконнект (grace period expired -> abandoned)
-    test("14. Окончательный дисконнект: техническое поражение после grace period", async () => {
+    test("15. Окончательный дисконнект: техническое поражение после grace period", async () => {
         const { matchDO, socketX, socketO } = await setupDirectMatch(3);
 
         const endPromise = waitForMessage(socketX, "match_ended");
@@ -632,7 +693,7 @@ describe("Серверный онлайн-мультиплеер TicTacToeA_VK",
     });
 
     // 15. Запись результатов в Cloudflare D1 и лидерборд без дублирования
-    test("15. Запись результатов в D1 и обновление лидерборда без дублирования", async () => {
+    test("16. Запись результатов в D1 и обновление лидерборда без дублирования", async () => {
         const { matchDO, matchId } = await setupDirectMatch(3);
 
         // Завершаем матч победой X

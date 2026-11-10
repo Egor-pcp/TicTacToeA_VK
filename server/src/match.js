@@ -106,8 +106,8 @@ export class Match {
         }
 
         server.addEventListener("message", event => this.onMessage(userId, event));
-        server.addEventListener("close", () => this.onSocketClose(userId));
-        server.addEventListener("error", () => this.onSocketClose(userId));
+        server.addEventListener("close", () => this.onSocketClose(userId, server));
+        server.addEventListener("error", () => this.onSocketClose(userId, server));
 
         // Отправляем текущее состояние партии подключившемуся игроку
         server.send(JSON.stringify(this.buildSnapshot(userId)));
@@ -232,7 +232,8 @@ export class Match {
         });
     }
 
-    onSocketClose(userId) {
+    onSocketClose(userId, socket) {
+        if (socket && this.sockets.get(userId) !== socket) return;
         this.sockets.delete(userId);
 
         if (this.status === "active") {
@@ -313,12 +314,29 @@ export class Match {
         };
         this.finalResult = endMessage;
 
-        this.broadcast(endMessage);
-
         // Идемпотентное сохранение в Cloudflare D1
         if (this.env?.DB && this.matchId && !this.d1Saved) {
             this.d1Saved = true;
             await this.saveResultToD1(winnerUserId, winner, reason, durationMs);
+        }
+
+        await this.releaseMatchmakerReservation();
+        this.broadcast(endMessage);
+    }
+
+    async releaseMatchmakerReservation() {
+        const namespace = this.env?.MATCHMAKER;
+        if (!namespace || !this.matchId) return;
+
+        try {
+            const matchmaker = namespace.get(namespace.idFromName("global-queue"));
+            await matchmaker.fetch(new Request("https://internal/match-ended", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ matchId: this.matchId })
+            }));
+        } catch (error) {
+            console.error("Failed to release Matchmaker reservation:", error);
         }
     }
 

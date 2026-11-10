@@ -33,6 +33,8 @@ export class OnlineServerClient extends EventTarget {
         this._heartbeatInterval = null;
         this._activeMatchInfo = null;
         this._listeners = new Map();
+        this._searchSessionGeneration = 0;
+        this._searchSession = null;
     }
 
     // --- Определение URL и параметров окружения ---
@@ -160,43 +162,103 @@ export class OnlineServerClient extends EventTarget {
     // --- Поиск соперника (Matchmaker DO) ---
 
     async startSearch(boardSize = 3, profile = {}) {
-        if (this.state === "searching") {
+        if (boardSize && typeof boardSize === "object") {
+            profile = boardSize.profile ?? profile;
+            boardSize = boardSize.boardSize ?? 3;
+        }
+        boardSize = [3, 4, 5].includes(Number(boardSize)) ? Number(boardSize) : 3;
+
+        if (this._searchSession && ["authenticating", "searching"].includes(this.state)) {
+            if (boardSize !== this._searchSession.boardSize) {
+                this.updateSearchBoardSize(boardSize, profile);
+            }
             return;
         }
 
-        if (!this.token) {
-            await this.authenticate();
+        const session = {
+            generation: ++this._searchSessionGeneration,
+            boardSize,
+            profile,
+            socket: null,
+            authenticated: false
+        };
+        this._searchSession = session;
+
+        try {
+            if (!this.token) await this.authenticate();
+        } catch (error) {
+            if (this._searchSession === session) this._searchSession = null;
+            throw error;
         }
 
+        if (this._searchSession !== session) return;
+
         this._closeSocket();
-        this._setState("searching", { boardSize });
+        this._setState("searching", { boardSize: session.boardSize });
 
         const queueUrl = `${this.wsUrl}?token=${encodeURIComponent(this.token)}`;
         const socket = new WebSocket(queueUrl);
+        session.socket = socket;
         this._socket = socket;
 
         socket.onopen = () => {
+            if (this._searchSession !== session) return;
             this._startHeartbeat();
         };
 
         socket.onmessage = event => {
-            this._handleQueueMessage(event.data, boardSize, profile);
+            if (this._searchSession === session) this._handleQueueMessage(event.data, session);
         };
 
         socket.onerror = error => {
+            if (this._searchSession !== session) return;
+            this._searchSession = null;
+            this._setState("error", { error: error?.message || "Ошибка соединения с сервером поиска" });
             this._emit("error", { message: "Ошибка соединения с сервером поиска", error });
         };
 
         socket.onclose = event => {
             this._stopHeartbeat();
-            if (this.state === "searching") {
+            if (this._searchSession === session && this.state === "searching") {
+                this._searchSession = null;
                 this._setState("idle");
                 this._emit("close", { code: event.code, reason: event.reason });
             }
         };
     }
 
-    _handleQueueMessage(rawData, boardSize, profile) {
+    updateSearchBoardSize(boardSize, profile = null) {
+        const session = this._searchSession;
+        if (!session || ![3, 4, 5].includes(boardSize)) return false;
+        if (!["authenticating", "searching"].includes(this.state)) return false;
+
+        session.boardSize = boardSize;
+        if (profile) session.profile = profile;
+        if (!session.authenticated) return true;
+
+        return this._sendFindMatch(session);
+    }
+
+    _sendFindMatch(session) {
+        const socket = session?.socket;
+        if (!socket || socket.readyState !== WebSocket.OPEN || this._searchSession !== session) {
+            return false;
+        }
+
+        try {
+            socket.send(JSON.stringify({
+                type: "find_match",
+                boardSize: session.boardSize,
+                profile: session.profile
+            }));
+            return true;
+        } catch (error) {
+            this._emit("error", { message: "Не удалось обновить поиск соперника", error });
+            return false;
+        }
+    }
+
+    _handleQueueMessage(rawData, session) {
         let msg;
         try {
             msg = JSON.parse(rawData);
@@ -207,31 +269,40 @@ export class OnlineServerClient extends EventTarget {
         switch (msg.type) {
             case "auth_ok":
                 // После подтверждения входа отправляем команду постановки в очередь
-                if (this._socket && this._socket.readyState === WebSocket.OPEN) {
-                    this._socket.send(JSON.stringify({
-                        type: "find_match",
-                        boardSize,
-                        profile
-                    }));
-                }
+                session.authenticated = true;
+                this._sendFindMatch(session);
                 break;
 
             case "searching":
+                if (msg.boardSize !== session.boardSize) {
+                    this._sendFindMatch(session);
+                    return;
+                }
+                this._setState("searching", { boardSize: msg.boardSize });
                 this._emit("searching", { boardSize: msg.boardSize });
                 break;
 
             case "search_canceled":
+                this._searchSession = null;
                 this._setState("idle");
                 this._emit("search_canceled");
                 break;
 
+            case "match_start_pending":
+                this._setState("connecting", { matchId: msg.matchId });
+                this._emit("match_start_pending", msg);
+                break;
+
             case "match_start":
+            case "match_already_started":
+                this._searchSession = null;
                 this._stopHeartbeat();
                 this._activeMatchInfo = msg;
                 this.currentMatchId = msg.matchId;
                 this.role = msg.role;
                 this.seq = 0;
 
+                this._setState("connecting", { matchId: msg.matchId });
                 this._emit("match_start", msg);
 
                 // Сохраняем в sessionStorage для защиты от перезагрузки страницы
@@ -250,6 +321,7 @@ export class OnlineServerClient extends EventTarget {
                 break;
 
             case "error":
+                this._searchSession = null;
                 this._setState("error", { message: msg.message });
                 this._emit("error", { message: msg.message });
                 break;
@@ -257,9 +329,12 @@ export class OnlineServerClient extends EventTarget {
     }
 
     cancelSearch() {
-        if (this._socket && this._socket.readyState === WebSocket.OPEN) {
+        const session = this._searchSession;
+        this._searchSession = null;
+        this._searchSessionGeneration += 1;
+        if (session?.socket && session.socket.readyState === WebSocket.OPEN) {
             try {
-                this._socket.send(JSON.stringify({ type: "cancel_search" }));
+                session.socket.send(JSON.stringify({ type: "cancel_search" }));
             } catch {}
         }
         this._closeSocket();
@@ -471,6 +546,8 @@ export class OnlineServerClient extends EventTarget {
     }
 
     dispose() {
+        this._searchSession = null;
+        this._searchSessionGeneration += 1;
         this._clearActiveMatchStorage();
         this._closeSocket();
         this._setState("idle");
