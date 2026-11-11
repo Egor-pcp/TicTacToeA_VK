@@ -29,6 +29,9 @@ export class Match {
         this.startedAt = 0;
         this.movesHistory = [];
         this.d1Saved = false;
+        this.rematchStatus = "unavailable";
+        this.rematchVotes = new Set();
+        this.rematchMatchId = null;
     }
 
     async fetch(request) {
@@ -38,6 +41,9 @@ export class Match {
         if (url.pathname === "/init" && request.method === "POST") {
             const data = await request.json();
             return this.handleInit(data);
+        }
+        if (url.pathname === "/abort-init" && request.method === "POST") {
+            return this.handleAbortInit();
         }
 
         // 2. Подключение игрока по WebSocket к этой комнате
@@ -58,6 +64,9 @@ export class Match {
         this.startedAt = Date.now();
         this.turnDeadline = Date.now() + DEFAULT_TURN_TIMEOUT_MS;
         this.d1Saved = false;
+        this.rematchStatus = "unavailable";
+        this.rematchVotes.clear();
+        this.rematchMatchId = null;
 
         this.players.X = {
             id: data.playerX.id,
@@ -73,6 +82,19 @@ export class Match {
         this.scheduleTurnAlarm();
 
         return new Response(JSON.stringify({ ok: true, matchId: this.matchId }), {
+            headers: { "Content-Type": "application/json" }
+        });
+    }
+
+    handleAbortInit() {
+        if (this.status !== "active" || this.movesHistory.length > 0 || this.sockets.size > 0) {
+            return new Response("Match is already in use", { status: 409 });
+        }
+        this.status = "aborted";
+        try {
+            this.ctx.storage.deleteAlarm();
+        } catch {}
+        return new Response(JSON.stringify({ ok: true }), {
             headers: { "Content-Type": "application/json" }
         });
     }
@@ -113,6 +135,19 @@ export class Match {
         server.send(JSON.stringify(this.buildSnapshot(userId)));
         if (this.status === "completed" && this.finalResult) {
             server.send(JSON.stringify(this.finalResult));
+            if (this.rematchStatus === "pending") {
+                server.send(JSON.stringify({
+                    type: "rematch_status",
+                    matchId: this.matchId,
+                    acceptedUserIds: [...this.rematchVotes]
+                }));
+            } else if (this.rematchStatus === "declined") {
+                server.send(JSON.stringify({ type: "rematch_declined", matchId: this.matchId }));
+            } else if (this.rematchStatus === "started") {
+                this.sendRematchStart(userId);
+            } else if (this.rematchStatus === "failed") {
+                server.send(JSON.stringify({ type: "rematch_error", matchId: this.matchId }));
+            }
         }
 
         return new Response(null, { status: 101, webSocket: client });
@@ -158,6 +193,9 @@ export class Match {
         switch (msg.type) {
             case "make_move":
                 this.handleMove(userId, msg);
+                break;
+            case "rematch_vote":
+                this.handleRematchVote(userId, msg);
                 break;
             case "reconnect_match":
                 this.sendSnapshot(userId);
@@ -232,6 +270,109 @@ export class Match {
         });
     }
 
+    async handleRematchVote(userId, message) {
+        if (this.status !== "completed" || ![this.players.X?.id, this.players.O?.id].includes(userId) ||
+            (message.matchId && message.matchId !== this.matchId) || typeof message.accept !== "boolean") return;
+
+        if (this.rematchStatus === "started") {
+            return this.sendRematchStart(userId);
+        }
+        if (this.rematchStatus === "starting" || this.rematchStatus === "failed") return;
+        if (this.rematchStatus === "declined") {
+            return this.sendToUser(userId, { type: "rematch_declined", matchId: this.matchId });
+        }
+
+        if (!message.accept) {
+            this.rematchStatus = "declined";
+            this.rematchVotes.clear();
+            this.broadcast({ type: "rematch_declined", matchId: this.matchId, declinedBy: userId });
+            return;
+        }
+
+        this.rematchVotes.add(userId);
+        this.rematchStatus = "pending";
+        this.broadcast({
+            type: "rematch_status",
+            matchId: this.matchId,
+            acceptedUserIds: [...this.rematchVotes]
+        });
+
+        if (this.rematchVotes.size === 2) {
+            this.rematchStatus = "starting";
+            await this.startRematch();
+        }
+    }
+
+    async startRematch() {
+        const playerX = this.players.O;
+        const playerO = this.players.X;
+        const matchId = crypto.randomUUID();
+        let nextMatch = null;
+        let initialized = false;
+
+        try {
+            const matchNamespace = this.env?.MATCH;
+            const matchmakerNamespace = this.env?.MATCHMAKER;
+            if (!matchNamespace || !matchmakerNamespace) throw new Error("Rematch services are unavailable");
+
+            nextMatch = matchNamespace.get(matchNamespace.idFromName(matchId));
+            const initResponse = await nextMatch.fetch(new Request("https://internal/init", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    matchId,
+                    boardSize: this.boardSize,
+                    playerX,
+                    playerO
+                })
+            }));
+            if (!initResponse.ok) throw new Error(`Rematch initialization failed: ${initResponse.status}`);
+            initialized = true;
+
+            const matchmaker = matchmakerNamespace.get(matchmakerNamespace.idFromName("global-queue"));
+            const reservationResponse = await matchmaker.fetch(new Request("https://internal/register-rematch", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    previousMatchId: this.matchId,
+                    matchId,
+                    boardSize: this.boardSize,
+                    playerX,
+                    playerO
+                })
+            }));
+            if (!reservationResponse.ok) throw new Error(`Rematch reservation failed: ${reservationResponse.status}`);
+
+            this.rematchMatchId = matchId;
+            this.rematchStatus = "started";
+            this.sendRematchStart(playerX.id);
+            this.sendRematchStart(playerO.id);
+        } catch (error) {
+            console.error("Failed to start rematch:", error);
+            if (initialized) {
+                try {
+                    await nextMatch.fetch(new Request("https://internal/abort-init", { method: "POST" }));
+                } catch {}
+            }
+            this.rematchStatus = "failed";
+            this.broadcast({ type: "rematch_error", matchId: this.matchId });
+        }
+    }
+
+    sendRematchStart(userId) {
+        if (!this.rematchMatchId) return;
+        const role = userId === this.players.O.id ? "X" : "O";
+        const opponent = role === "X" ? this.players.X : this.players.O;
+        this.sendToUser(userId, {
+            type: "rematch_start",
+            previousMatchId: this.matchId,
+            matchId: this.rematchMatchId,
+            boardSize: this.boardSize,
+            role,
+            opponent
+        });
+    }
+
     onSocketClose(userId, socket) {
         if (socket && this.sockets.get(userId) !== socket) return;
         this.sockets.delete(userId);
@@ -299,6 +440,8 @@ export class Match {
     async finishMatch(winner, reason = "win", winningLine = null) {
         if (this.status === "completed") return; // Защита от повторного завершения
         this.status = "completed";
+        this.rematchStatus = "waiting";
+        this.rematchVotes.clear();
 
         const winnerUserId = winner === "X" ? this.players.X?.id : winner === "O" ? this.players.O?.id : null;
         const durationMs = Date.now() - this.startedAt;

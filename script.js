@@ -647,15 +647,19 @@ function updateInterface() {
         searching: "Поиск игрока, а пока сыграй сам с собой.",
         starting: "Подключаемся к поиску. Практика доступна.",
         connecting: "Игрок найден! Устанавливаем соединение…",
-        ready: gameOver && onlineResultMessage
-            ? onlineResultMessage
-            : onlineMatch?.localRematchRequested && !onlineMatch?.peerRematchRequested
-                ? "Реванш запрошен. Ожидаем соперника."
-                : onlineMatch?.peerRematchRequested && !onlineMatch?.localRematchRequested
-                    ? "Соперник предлагает реванш."
-                    : onlineMatch?.started
-                        ? currentPlayer === onlineMatch.localSide ? "Твой ход" : "Ход соперника"
-                        : "Соединение установлено. Готовимся к матчу…",
+        ready: gameOver && onlineMatch?.rematchState === "pending"
+            ? onlineMatch.rematchAcceptedUserIds?.includes(onlineServerClient?.userId)
+                ? "Ты согласился на реванш. Ожидаем соперника."
+                : "Соперник предлагает реванш."
+            : gameOver && onlineMatch?.rematchState === "declined"
+                ? "Соперник отказался от реванша. Можно начать новый поиск."
+                : gameOver && onlineMatch?.rematchState === "failed"
+                    ? "Не удалось создать реванш. Можно начать новый поиск."
+                    : gameOver && onlineResultMessage
+                        ? onlineResultMessage
+                        : onlineMatch?.started
+                            ? currentPlayer === onlineMatch.localSide ? "Твой ход" : "Ход соперника"
+                            : "Соединение установлено. Готовимся к матчу…",
         error: onlineErrorMessage || "Онлайн временно недоступен. Практика остаётся доступна."
     };
 
@@ -679,6 +683,24 @@ function updateInterface() {
         if (onlinePractice) {
             restartButton.textContent = gameStarted || gameOver ? "↻ Новая практика" : "Начать практику";
             restartButton.disabled = false;
+        } else if (gameOver && onlineMatch?.completed) {
+            const rematchState = onlineMatch.rematchState || "available";
+            const localAccepted = onlineMatch.rematchAcceptedUserIds?.includes(onlineServerClient?.userId);
+            if (rematchState === "declined" || rematchState === "failed") {
+                restartButton.textContent = "🔍 Новый поиск";
+                restartButton.disabled = false;
+            } else if (rematchState === "pending" && localAccepted) {
+                restartButton.textContent = onlineMatch.rematchAcceptedUserIds?.length === 2
+                    ? "Создаём реванш…"
+                    : "Ожидаем соперника…";
+                restartButton.disabled = true;
+            } else if (rematchState === "pending") {
+                restartButton.textContent = "Принять реванш";
+                restartButton.disabled = false;
+            } else {
+                restartButton.textContent = "Предложить реванш";
+                restartButton.disabled = false;
+            }
         } else if (gameOver) {
             restartButton.textContent = "🔍 Новый поиск";
             restartButton.disabled = false;
@@ -725,6 +747,13 @@ function updateInterface() {
                 currentPlayer === onlineMatch.localSide);
     });
     updateModeButtons();
+    const computerModeButton = modeButtons.find(button => button.dataset.mode === "computer");
+    if (computerModeButton) {
+        const canDeclineRematch = gameMode === "online" && onlineMatch?.completed &&
+            !["declined", "failed", "started"].includes(onlineMatch.rematchState) &&
+            onlineMatch.rematchAcceptedUserIds?.length !== 2;
+        computerModeButton.innerHTML = canDeclineRematch ? "Отказаться" : "Против<br>компьютера";
+    }
     updateOnlinePlayerCard();
 }
 
@@ -1143,7 +1172,9 @@ function setupOnlineClientListeners(client, requestId) {
             localSide: snapshot.role,
             started: true,
             completed: snapshot.status === "completed",
-            opponentName: onlinePeerId
+            opponentName: onlinePeerId,
+            rematchState: snapshot.status === "completed" ? "available" : "started",
+            rematchAcceptedUserIds: []
         };
 
         currentPlayer = snapshot.turn;
@@ -1203,6 +1234,8 @@ function setupOnlineClientListeners(client, requestId) {
 
     client.on("match_ended", data => {
         if (!isCurrentClient()) return;
+        if (data.matchId && onlineMatch?.matchId && data.matchId !== onlineMatch.matchId) return;
+        onlineState = "ready";
         stopDisconnectCountdown();
         if (reconnectedMessageTimeout) {
             clearTimeout(reconnectedMessageTimeout);
@@ -1258,6 +1291,8 @@ function setupOnlineClientListeners(client, requestId) {
         if (onlineMatch) {
             onlineMatch.completed = true;
             onlineMatch.winner = data.winner;
+            onlineMatch.rematchState = "available";
+            onlineMatch.rematchAcceptedUserIds = [];
         }
 
         const finalDuration = typeof data.durationMs === "number" ? data.durationMs : timerState.finish();
@@ -1266,6 +1301,56 @@ function setupOnlineClientListeners(client, requestId) {
             window.dispatchEvent(new CustomEvent("tictactoe:match-completed", { detail: matchResult }));
         }
 
+        updateInterface();
+        updateTimerDisplay();
+    });
+
+    client.on("rematch_status", data => {
+        if (!isCurrentClient() || data.matchId !== onlineMatch?.matchId) return;
+        onlineMatch.rematchState = "pending";
+        onlineMatch.rematchAcceptedUserIds = data.acceptedUserIds || [];
+        updateInterface();
+    });
+
+    client.on("rematch_declined", data => {
+        if (!isCurrentClient() || data.matchId !== onlineMatch?.matchId) return;
+        onlineMatch.rematchState = "declined";
+        onlineMatch.rematchAcceptedUserIds = [];
+        onlineResultMessage = "Соперник отказался от реванша. Можно начать новый поиск.";
+        updateInterface();
+    });
+
+    client.on("rematch_error", data => {
+        if (!isCurrentClient() || data.matchId !== onlineMatch?.matchId) return;
+        onlineMatch.rematchState = "failed";
+        onlineResultMessage = "Не удалось создать реванш. Можно начать новый поиск.";
+        updateInterface();
+    });
+
+    client.on("rematch_start", data => {
+        if (!isCurrentClient() || data.previousMatchId !== onlineMatch?.matchId) return;
+        stopTimerDisplay();
+        timerState.reset();
+        cancelComputerMoveTimer();
+        onlineState = "connecting";
+        onlineMatch = {
+            matchId: data.matchId,
+            localSide: data.role,
+            started: false,
+            completed: false,
+            opponentName: data.opponent?.name,
+            rematchState: "started",
+            rematchAcceptedUserIds: []
+        };
+        boardSize = data.boardSize;
+        updateBoardSizeSelection(boardSize);
+        board = Array(boardSize * boardSize).fill("");
+        gameStarted = false;
+        gameOver = false;
+        currentPlayer = "X";
+        activeMatch = null;
+        onlineResultMessage = "";
+        renderBoard();
         updateInterface();
         updateTimerDisplay();
     });
@@ -1398,6 +1483,13 @@ function switchToComputer(notice = "") {
 function handleModeButton(button) {
     if (button.dataset.mode === "computer") {
         if (gameMode === "online" || onlineStartPending) {
+            if (onlineMatch?.completed && onlineMatch.rematchState !== "declined" &&
+                onlineMatch.rematchState !== "failed" && onlineMatch.rematchState !== "started") {
+                if (onlineMatch.rematchAcceptedUserIds?.length === 2) return;
+                onlineServerClient?.voteRematch(false);
+                switchToComputer("Вы отказались от реванша.");
+                return;
+            }
             const notice = onlineStartPending || ["starting", "searching", "connecting", "ready"].includes(onlineState)
                 ? "Поиск отменён"
                 : "";
@@ -1475,6 +1567,13 @@ restartButton.addEventListener("click", () => {
         if (canPlayOnlinePractice(onlinePracticeState)) {
             if (!gameStarted && !gameOver) startGame();
             else restartGame();
+            return;
+        }
+        if (gameOver && onlineMatch?.completed && !["declined", "failed"].includes(onlineMatch.rematchState)) {
+            onlineMatch.rematchState = "pending";
+            onlineMatch.rematchAcceptedUserIds = [onlineServerClient?.userId].filter(Boolean);
+            onlineServerClient?.voteRematch(true);
+            updateInterface();
             return;
         }
         if (gameOver) {
@@ -1912,49 +2011,6 @@ function runTimerTests() {
 
 window.runTimerTests = runTimerTests;
 
-function renderDevModeBadge() {
-    if (typeof window === "undefined" || !document.body) return;
-
-    // Не отображаем в боевой среде VK Mini Apps или вне доверенного Development Mode
-    if (platformAdapter?.mode !== "development" || !isDevelopmentEnvironment()) {
-        const badge = document.querySelector("#dev-mode-badge");
-        if (badge) badge.remove();
-        return;
-    }
-
-    const currentDevUser = platformAdapter?.getUserId() || (new URLSearchParams(window.location.search)).get("dev_user") || sessionStorage.getItem("tictactoe_dev_user") || "dev_user_1";
-    const nextDevUser = currentDevUser === "dev_user_1" ? "dev_user_2" : "dev_user_1";
-
-    let badge = document.querySelector("#dev-mode-badge");
-    if (!badge) {
-        badge = document.createElement("div");
-        badge.id = "dev-mode-badge";
-        badge.className = "dev-badge";
-        const footer = document.querySelector(".game-footer");
-        if (footer && footer.parentNode) {
-            footer.parentNode.insertBefore(badge, footer.nextSibling);
-        } else {
-            const gameView = document.querySelector("#game-view");
-            if (gameView) gameView.appendChild(badge);
-        }
-    }
-
-    badge.innerHTML = `
-        <span>🔧 <strong>Dev-режим:</strong> <code>${currentDevUser}</code></span>
-        <button type="button" id="switch-dev-user-btn" title="Переключить тестового игрока">Сменить на ${nextDevUser}</button>
-    `;
-
-    document.querySelector("#switch-dev-user-btn")?.addEventListener("click", () => {
-        try {
-            platformAdapter?.setDevUser(nextDevUser);
-        } catch {}
-        sessionStorage.setItem("tictactoe_dev_user", nextDevUser);
-        const newUrl = new URL(window.location.href);
-        newUrl.searchParams.set("dev_user", nextDevUser);
-        window.location.href = newUrl.href;
-    });
-}
-
 function initCommunityLink() {
     const communityBtn = document.querySelector(".about-channel-button");
     if (!communityBtn) return;
@@ -1978,7 +2034,7 @@ function initCommunityLink() {
     }
 }
 
-// Инициализация при загрузке: платформа, отображение Dev-бейджа и проверка Reconnect
+// Инициализация при загрузке: платформа и проверка Reconnect
 (async function initClientEnvironment() {
     platformAdapter = createPlatformAdapter();
     adCooldownManager.setPlatformAdapter(platformAdapter);
@@ -1988,7 +2044,6 @@ function initCommunityLink() {
         console.warn("Platform adapter init notice:", err?.message || err);
     }
 
-    renderDevModeBadge();
     initCommunityLink();
 
     const client = new OnlineServerClient({ platformAdapter });

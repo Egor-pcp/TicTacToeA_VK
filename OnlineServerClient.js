@@ -440,8 +440,37 @@ export class OnlineServerClient extends EventTarget {
 
             case "match_ended":
                 this._setState("completed", { winner: msg.winner, reason: msg.reason });
-                this._clearActiveMatchStorage();
                 this._emit("match_ended", msg);
+                break;
+
+            case "rematch_status":
+                this._emit("rematch_status", msg);
+                break;
+
+            case "rematch_declined":
+                this._emit("rematch_declined", msg);
+                break;
+
+            case "rematch_error":
+                this._emit("rematch_error", msg);
+                break;
+
+            case "rematch_start":
+                this.currentMatchId = msg.matchId;
+                this.role = msg.role;
+                this.seq = 0;
+                this._activeMatchInfo = msg;
+                try {
+                    sessionStorage.setItem("tictactoe_active_match", JSON.stringify({
+                        matchId: msg.matchId,
+                        boardSize: msg.boardSize,
+                        role: msg.role,
+                        devUser: this.devUser,
+                        launchParams: this.launchParams
+                    }));
+                } catch {}
+                this._emit("rematch_start", msg);
+                this.connectToMatch(msg.matchId);
                 break;
 
             case "heartbeat_ack":
@@ -469,6 +498,19 @@ export class OnlineServerClient extends EventTarget {
             seq: this.seq
         }));
         return this.seq;
+    }
+
+    voteRematch(accept) {
+        if (typeof accept !== "boolean" || this.state !== "completed" ||
+            !this._socket || this._socket.readyState !== WebSocket.OPEN || !this.currentMatchId) {
+            return false;
+        }
+        this._socket.send(JSON.stringify({
+            type: "rematch_vote",
+            matchId: this.currentMatchId,
+            accept
+        }));
+        return true;
     }
 
     // --- Восстановление сессии (Reconnect) ---

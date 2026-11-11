@@ -470,6 +470,124 @@ describe("Клиентский модуль OnlineServerClient", () => {
         client2.dispose();
     });
 
+    test("Реванш: оба согласия создают один чистый раунд с тем же соперником и обменом X/O", async () => {
+        const client1 = new OnlineServerClient({ serverUrl: "http://localhost:8787", devUser: "dev_user_1" });
+        const client2 = new OnlineServerClient({ serverUrl: "http://localhost:8787", devUser: "dev_user_2" });
+        try {
+            const matchStart1 = waitForEvent(client1, "match_start");
+            const matchStart2 = waitForEvent(client2, "match_start");
+            await Promise.all([client1.startSearch(3), client2.startSearch(3)]);
+            const [firstStart1, firstStart2] = await Promise.all([matchStart1, matchStart2]);
+            assert.equal(firstStart1.matchId, firstStart2.matchId);
+
+            const firstSnapshot1 = waitForEvent(client1, "snapshot");
+            const firstSnapshot2 = waitForEvent(client2, "snapshot");
+            const [first1, first2] = await Promise.all([firstSnapshot1, firstSnapshot2]);
+            assert.equal(first1.matchId, firstStart1.matchId);
+            assert.equal(first2.matchId, firstStart1.matchId);
+
+            const firstX = client1.role === "X" ? client1 : client2;
+            const firstO = client1.role === "O" ? client1 : client2;
+            for (const [turnClient, otherClient, index] of [
+                [firstX, firstO, 0], [firstO, firstX, 3], [firstX, firstO, 1], [firstO, firstX, 4]
+            ]) {
+                const move1 = waitForEvent(turnClient, "move_applied");
+                const move2 = waitForEvent(otherClient, "move_applied");
+                turnClient.makeMove(index);
+                await Promise.all([move1, move2]);
+            }
+            const firstHistory1 = waitForEvent(client1, "match_ended");
+            const firstHistory2 = waitForEvent(client2, "match_ended");
+            firstX.makeMove(2);
+            await Promise.all([firstHistory1, firstHistory2]);
+            assert.equal(mockEnv.DB._db.prepare("SELECT COUNT(*) AS count FROM match_history").get().count, 1);
+
+            const rematchStart1 = waitForEvent(client1, "rematch_start");
+            const rematchStart2 = waitForEvent(client2, "rematch_start");
+            const rematchSnapshot1 = waitForEvent(client1, "snapshot");
+            const rematchSnapshot2 = waitForEvent(client2, "snapshot");
+            const waitingForSecondApproval = waitForEvent(client2, "rematch_status");
+            assert.equal(client1.voteRematch(true), true);
+            assert.equal(client1.voteRematch(true), true);
+            await waitingForSecondApproval;
+            assert.equal(matchInstances.size, 1, "one consent must not create a rematch");
+            assert.equal(client2.voteRematch(true), true);
+            assert.equal(client2.voteRematch(true), true);
+            const [rematch1, rematch2] = await Promise.all([rematchStart1, rematchStart2]);
+            const [snapshot1, snapshot2] = await Promise.all([rematchSnapshot1, rematchSnapshot2]);
+
+            assert.equal(rematch1.matchId, rematch2.matchId);
+            assert.notEqual(rematch1.matchId, firstStart1.matchId);
+            assert.equal(rematch1.role, firstStart1.role === "X" ? "O" : "X");
+            assert.equal(rematch2.role, firstStart2.role === "X" ? "O" : "X");
+            assert.deepEqual(snapshot1.board, Array(9).fill(""));
+            assert.deepEqual(snapshot2.board, Array(9).fill(""));
+            assert.equal(snapshot1.seq, 0);
+            assert.equal(snapshot2.seq, 0);
+            assert.equal(matchInstances.size, 2);
+            assert.equal(matchmakerInstance.ctx.storage.sql.exec(
+                "SELECT COUNT(*) AS count FROM active_matches WHERE match_id = ?",
+                rematch1.matchId
+            ).toArray()[0].count, 2);
+            assert.equal(mockEnv.DB._db.prepare("SELECT COUNT(*) AS count FROM match_history").get().count, 1);
+
+            const secondX = client1.role === "X" ? client1 : client2;
+            const secondO = client1.role === "O" ? client1 : client2;
+            for (const [turnClient, otherClient, index] of [
+                [secondX, secondO, 0], [secondO, secondX, 3], [secondX, secondO, 1], [secondO, secondX, 4]
+            ]) {
+                const move1 = waitForEvent(turnClient, "move_applied");
+                const move2 = waitForEvent(otherClient, "move_applied");
+                turnClient.makeMove(index);
+                await Promise.all([move1, move2]);
+            }
+            const secondEnd1 = waitForEvent(client1, "match_ended");
+            const secondEnd2 = waitForEvent(client2, "match_ended");
+            secondX.makeMove(2);
+            await Promise.all([secondEnd1, secondEnd2]);
+            assert.equal(mockEnv.DB._db.prepare("SELECT COUNT(*) AS count FROM match_history").get().count, 2);
+            assert.equal(mockEnv.DB._db.prepare("SELECT games_played FROM leaderboards WHERE vk_user_id = ?").get("dev_user_1").games_played, 2);
+            assert.equal(mockEnv.DB._db.prepare("SELECT games_played FROM leaderboards WHERE vk_user_id = ?").get("dev_user_2").games_played, 2);
+        } finally {
+            client1.dispose();
+            client2.dispose();
+        }
+    });
+
+    test("Реванш: отказ уведомляет соперника и оставляет обычный поиск доступным", async () => {
+        const client1 = new OnlineServerClient({ serverUrl: "http://localhost:8787", devUser: "dev_user_1" });
+        const client2 = new OnlineServerClient({ serverUrl: "http://localhost:8787", devUser: "dev_user_2" });
+        try {
+            const matchStart1 = waitForEvent(client1, "match_start");
+            const matchStart2 = waitForEvent(client2, "match_start");
+            await Promise.all([client1.startSearch(3), client2.startSearch(3)]);
+            const [start1] = await Promise.all([matchStart1, matchStart2]);
+            await Promise.all([waitForEvent(client1, "snapshot"), waitForEvent(client2, "snapshot")]);
+
+            const matchEnded1 = waitForEvent(client1, "match_ended");
+            const matchEnded2 = waitForEvent(client2, "match_ended");
+            await matchInstances.get(start1.matchId).finishMatch("draw", "draw");
+            await Promise.all([matchEnded1, matchEnded2]);
+
+            const pending = waitForEvent(client1, "rematch_status");
+            client1.voteRematch(true);
+            await pending;
+            const declined1 = waitForEvent(client1, "rematch_declined");
+            const declined2 = waitForEvent(client2, "rematch_declined");
+            client2.voteRematch(false);
+            await Promise.all([declined1, declined2]);
+
+            const searching = waitForEvent(client1, "searching");
+            await client1.startSearch(3);
+            assert.equal((await searching).boardSize, 3);
+            assert.equal(client1.state, "searching");
+            assert.equal(matchInstances.size, 1);
+        } finally {
+            client1.dispose();
+            client2.dispose();
+        }
+    });
+
     test("6. Отклонение хода не в свою очередь", async () => {
         const client1 = new OnlineServerClient({
             serverUrl: "http://localhost:8787",

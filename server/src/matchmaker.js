@@ -49,6 +49,9 @@ export class Matchmaker {
         if (url.pathname === "/match-ended" && request.method === "POST") {
             return this.handleMatchEnded(request);
         }
+        if (url.pathname === "/register-rematch" && request.method === "POST") {
+            return this.handleRegisterRematch(request);
+        }
 
         if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
             return new Response("Expected WebSocket upgrade", { status: 426 });
@@ -336,6 +339,67 @@ export class Matchmaker {
             "UPDATE active_matches SET status = 'completed' WHERE match_id = ?",
             data.matchId
         );
+        return new Response(JSON.stringify({ ok: true }), {
+            headers: { "Content-Type": "application/json" }
+        });
+    }
+
+    async handleRegisterRematch(request) {
+        let data;
+        try {
+            data = await request.json();
+        } catch {
+            return new Response("Invalid JSON", { status: 400 });
+        }
+
+        const { previousMatchId, matchId, boardSize, playerX, playerO } = data ?? {};
+        if (!previousMatchId || !matchId || !VALID_BOARD_SIZES.has(boardSize) ||
+            !playerX?.id || !playerO?.id || playerX.id === playerO.id) {
+            return new Response("Invalid rematch", { status: 400 });
+        }
+
+        const existing = this.ctx.storage.sql.exec(
+            "SELECT user_id FROM active_matches WHERE match_id = ?",
+            matchId
+        ).toArray();
+        if (existing.length === 2 && existing.some(row => row.user_id === playerX.id) &&
+            existing.some(row => row.user_id === playerO.id)) {
+            return new Response(JSON.stringify({ ok: true, duplicate: true }), {
+                headers: { "Content-Type": "application/json" }
+            });
+        }
+
+        const previous = this.ctx.storage.sql.exec(
+            "SELECT * FROM active_matches WHERE match_id = ?",
+            previousMatchId
+        ).toArray();
+        const previousX = previous.find(row => row.role === "X");
+        const previousO = previous.find(row => row.role === "O");
+        if (previous.length !== 2 || previous.some(row => row.status !== "completed") ||
+            !previousX || !previousO || playerX.id !== previousO.user_id || playerO.id !== previousX.user_id) {
+            return new Response("Previous match is unavailable for rematch", { status: 409 });
+        }
+
+        try {
+            this.ctx.storage.sql.exec("BEGIN");
+            this.ctx.storage.sql.exec("DELETE FROM active_matches WHERE match_id = ?", previousMatchId);
+            this.ctx.storage.sql.exec(`
+                INSERT INTO active_matches (
+                    user_id, match_id, board_size, role, opponent_id, opponent_name,
+                    opponent_avatar, status, created_at
+                ) VALUES (?, ?, ?, 'X', ?, ?, ?, 'active', ?), (?, ?, ?, 'O', ?, ?, ?, 'active', ?)
+            `,
+            playerX.id, matchId, boardSize, playerO.id, playerO.name, playerO.avatar, Date.now(),
+            playerO.id, matchId, boardSize, playerX.id, playerX.name, playerX.avatar, Date.now());
+            this.ctx.storage.sql.exec("COMMIT");
+        } catch (error) {
+            try {
+                this.ctx.storage.sql.exec("ROLLBACK");
+            } catch {}
+            console.error("Failed to reserve rematch:", error);
+            return new Response("Failed to reserve rematch", { status: 500 });
+        }
+
         return new Response(JSON.stringify({ ok: true }), {
             headers: { "Content-Type": "application/json" }
         });
